@@ -146,14 +146,31 @@ class TokenUsageBuffer:
                     break
 
     async def _flush_once(self, force: bool = False) -> None:
-        """Write ``_disk_cache`` to disk if dirty."""
+        """Write ``_disk_cache`` to disk if dirty.
+
+        On write failure the buffer stays dirty so a later periodic flush
+        will retry.  Events that arrive while the snapshot is being written
+        also keep the buffer dirty.
+        """
         if not self._dirty and not force:
             return
+
+        # Clear the flag *before* taking the snapshot so that any event
+        # enqueued between the snapshot and the ``asyncio.to_thread`` call
+        # will set it back to ``True``.  If the write fails we restore it.
         self._dirty = False
 
         snapshot = copy.deepcopy(self._disk_cache)
-        await asyncio.to_thread(save_data_sync, self._path, snapshot)
-        logger.debug("token_usage: flushed cache to disk")
+        success = await asyncio.to_thread(save_data_sync, self._path, snapshot)
+
+        if not success:
+            self._dirty = True
+            logger.warning(
+                "token_usage: flush failed, dirty flag restored "
+                "for next retry",
+            )
+        else:
+            logger.debug("token_usage: flushed cache to disk")
 
     async def _flush_loop(self) -> None:
         """Periodically flush the cache to disk."""
