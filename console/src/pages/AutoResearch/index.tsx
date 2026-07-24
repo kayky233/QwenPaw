@@ -29,7 +29,6 @@ import {
   RocketOutlined,
   LoadingOutlined,
   BranchesOutlined,
-  SendOutlined,
   BulbOutlined,
   SearchOutlined,
   FileSearchOutlined,
@@ -37,13 +36,10 @@ import {
   MergeCellsOutlined,
 } from "@ant-design/icons";
 import {
-  DownloadOutlined,
   ThunderboltOutlined,
-  SaveOutlined,
   CloseCircleOutlined,
   InfoCircleOutlined,
   MessageOutlined,
-  EyeOutlined,
   CopyOutlined,
 } from "@ant-design/icons";
 import { api, getApiUrl } from "@/api";
@@ -444,18 +440,22 @@ export default function AutoResearchPage() {
             if (!prev) {
               // First event: build initial state from event data
               return {
-                run_id: rId,
+                id: rId,
+                task_id: "",
+                agent_id: "",
                 status: "running",
                 phase: data.phase,
-                current_round: data.round ?? 0,
-                total_rounds: 0,
+                rounds: 0,
+                current_round: data.round ?? null,
                 completed_rounds: 0,
                 events: [newEvent],
                 outcomes: [],
                 created_at: data.timestamp ?? new Date().toISOString(),
                 updated_at: data.timestamp ?? new Date().toISOString(),
-                error: null,
-              } as ResearchRunState;
+                started_at: null,
+                finished_at: null,
+                error: "",
+              };
             }
             return {
               ...prev,
@@ -470,18 +470,22 @@ export default function AutoResearchPage() {
             const outcome = data.outcome as ResearchRunOutcome;
             if (!prev) {
               return {
-                run_id: rId,
+                id: rId,
+                task_id: "",
+                agent_id: "",
                 status: "running",
                 phase: data.phase ?? "evaluating_candidate",
-                current_round: outcome.round ?? 0,
-                total_rounds: 0,
+                rounds: 0,
+                current_round: outcome.round ?? null,
                 completed_rounds: 1,
                 events: [],
                 outcomes: [outcome],
                 created_at: data.timestamp ?? new Date().toISOString(),
                 updated_at: data.timestamp ?? new Date().toISOString(),
-                error: null,
-              } as ResearchRunState;
+                started_at: null,
+                finished_at: null,
+                error: "",
+              };
             }
             // Upsert with deep merge: preserve partial metrics from earlier updates
             const idx = prev.outcomes.findIndex((o) => o.round === outcome.round);
@@ -576,33 +580,6 @@ export default function AutoResearchPage() {
     if (!taskId || !["succeeded", "failed", "cancelled"].includes(phase)) return;
     api.getTask(taskId).then(setTask).catch(() => {});
   }, [taskId, phase]);
-
-  // ── Start dialog research (async: returns immediately, SSE for progress) ──
-  const startResearch = useCallback(async () => {
-    if (!goal.trim()) return;
-    setPhase("planning");
-    setError(null);
-    setRunState(null);
-    setTask(null);
-    setPlanningEvents(["📤 提交目标，等待 AI 规划..."]);
-
-    try {
-      const result = await api.dialogResearch({
-        goal: goal.trim(),
-        rounds,
-        auto_pr: autoPr,
-      });
-
-      activePlanIdRef.current = result.plan_id;
-      // Connect SSE for planning progress
-      connectDialogSSE(result.plan_id);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "提交失败";
-      setPhase("idle");
-      setError(msg);
-      setPlanningEvents([]);
-    }
-  }, [goal, rounds, autoPr, connectDialogSSE]);
 
   // ── Connect dialog-planning SSE ──
   const connectDialogSSE = useCallback((planId: string) => {
@@ -709,6 +686,33 @@ export default function AutoResearchPage() {
       poll();
     };
   }, [startRunStream]);
+
+  // ── Start dialog research (async: returns immediately, SSE for progress) ──
+  const startResearch = useCallback(async () => {
+    if (!goal.trim()) return;
+    setPhase("planning");
+    setError(null);
+    setRunState(null);
+    setTask(null);
+    setPlanningEvents(["📤 提交目标，等待 AI 规划..."]);
+
+    try {
+      const result = await api.dialogResearch({
+        goal: goal.trim(),
+        rounds,
+        auto_pr: autoPr,
+      });
+
+      activePlanIdRef.current = result.plan_id;
+      // Connect SSE for planning progress
+      connectDialogSSE(result.plan_id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "提交失败";
+      setPhase("idle");
+      setError(msg);
+      setPlanningEvents([]);
+    }
+  }, [goal, rounds, autoPr, connectDialogSSE]);
 
   // ── Recover from disconnected state: query backend, then decide next step ──
   const recoverConnection = useCallback(async () => {
