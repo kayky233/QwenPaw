@@ -339,7 +339,10 @@ export default function AutoResearchPage() {
   const streamRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const activeRunIdRef = useRef<string | null>(null);
+  const activePlanIdRef = useRef<string | null>(null);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
+  // Ref to break circular dependency between scheduleReconnect and connectSSE
+  const connectSSERef = useRef<((rId: string) => void) | null>(null);
 
   // ── Schedule SSE reconnection with exponential backoff ──
   const scheduleReconnect = useCallback((rId: string) => {
@@ -348,21 +351,31 @@ export default function AutoResearchPage() {
     setConnectionState("reconnecting");
 
     reconnectTimerRef.current = setTimeout(async () => {
-      const state = await api.getRun(rId);
-      if (activeRunIdRef.current !== rId) return; // stale callback
-      setRunState(state);
-      if (["queued", "running"].includes(state.status)) {
-        connectSSE(rId);
-      } else {
-        // Terminal state
-        setConnectionState("connected");
-        if (state.status === "completed") setPhase("succeeded");
-        else if (state.status === "cancelled") { setPhase("cancelled"); setError("研究已取消"); }
-        else { setPhase("failed"); setError(state.error || "研究执行失败"); }
-        if (taskId) api.getTask(taskId).then(setTask).catch(() => {});
+      try {
+        const state = await api.getRun(rId);
+        if (activeRunIdRef.current !== rId) return;
+        setRunState(state);
+        if (["queued", "running"].includes(state.status)) {
+          connectSSERef.current?.(rId);
+        } else {
+          setConnectionState("connected");
+          if (state.status === "completed") setPhase("succeeded");
+          else if (state.status === "cancelled") { setPhase("cancelled"); setError("研究已取消"); }
+          else { setPhase("failed"); setError(state.error || "研究执行失败"); }
+          if (taskId) api.getTask(taskId).then(setTask).catch(() => {});
+        }
+      } catch {
+        if (activeRunIdRef.current !== rId) return;
+        const attempt = reconnectAttemptsRef.current;
+        if (attempt < 5) {
+          scheduleReconnect(rId);
+        } else {
+          setConnectionState("disconnected");
+          setError("实时连接已断开，无法获取研究状态。请手动恢复。");
+        }
       }
     }, delay);
-  }, [connectSSE, taskId]);
+  }, [taskId]);
 
   // ── Cleanup SSE and reconnect timers ──
   useEffect(() => {
@@ -378,8 +391,10 @@ export default function AutoResearchPage() {
   const connectSSE = useCallback((rId: string) => {
     // Track active run to prevent stale callbacks
     activeRunIdRef.current = rId;
-    // Reset reconnection attempts on fresh connection
-    reconnectAttemptsRef.current = 0;
+    // NOTE: Do NOT reset reconnectAttemptsRef here — that would forever
+    // prevent the 5-retry limit from being reached (each reconnect would
+    // start counting from 0 again). Only reset in es.onopen (success)
+    // and startRunStream (fresh task).
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -499,6 +514,20 @@ export default function AutoResearchPage() {
               updated_at: data.timestamp ?? new Date().toISOString(),
             };
           });
+        } else if (data.type === "done" || data.type === "run.completed" || data.type === "run.failed" || data.type === "run.cancelled") {
+          es.close();
+          eventSourceRef.current = null;
+          setConnectionState("connected");
+          if (data.type === "run.completed" || data.status === "completed") {
+            setPhase("succeeded");
+          } else if (data.type === "run.cancelled" || data.status === "cancelled") {
+            setPhase("cancelled");
+            setError(data.error ?? "研究已取消");
+          } else {
+            setPhase("failed");
+            setError(data.error ?? "研究执行失败");
+          }
+          return;
         }
       } catch {
         // ignore parse errors
@@ -520,12 +549,16 @@ export default function AutoResearchPage() {
       }
     };
   }, [taskId, scheduleReconnect]);
+  // Keep ref in sync to break circular dependency with scheduleReconnect
+  connectSSERef.current = connectSSE;
 
   // ── Start a run stream: fetch initial state first, then connect SSE ──
   const startRunStream = useCallback(async (runId: string) => {
     activeRunIdRef.current = runId;
     // Clear dedup set for new run
     seenEventKeysRef.current.clear();
+    // Reset reconnection attempts for a fresh start
+    reconnectAttemptsRef.current = 0;
     try {
       const initialState = await api.getRun(runId);
       if (activeRunIdRef.current !== runId) return;
@@ -560,6 +593,7 @@ export default function AutoResearchPage() {
         auto_pr: autoPr,
       });
 
+      activePlanIdRef.current = result.plan_id;
       // Connect SSE for planning progress
       connectDialogSSE(result.plan_id);
     } catch (e: unknown) {
@@ -568,10 +602,11 @@ export default function AutoResearchPage() {
       setError(msg);
       setPlanningEvents([]);
     }
-  }, [goal, rounds, autoPr]);
+  }, [goal, rounds, autoPr, connectDialogSSE]);
 
   // ── Connect dialog-planning SSE ──
   const connectDialogSSE = useCallback((planId: string) => {
+    activePlanIdRef.current = planId;
     eventSourceRef.current?.close();
 
     const sseUrl = getApiUrl(`/research/dialog/${planId}/stream`);
@@ -580,6 +615,8 @@ export default function AutoResearchPage() {
 
     es.onmessage = (event) => {
       try {
+        // Stale connection guard
+        if (activePlanIdRef.current !== planId || eventSourceRef.current !== es) return;
         const data = JSON.parse(event.data);
         if (data.type === "event") {
           const label = DIALOG_PHASE_LABELS[data.phase] ?? data.phase;
@@ -588,6 +625,7 @@ export default function AutoResearchPage() {
         } else if (data.type === "done") {
           es.close();
           eventSourceRef.current = null;
+          activePlanIdRef.current = null;
 
           if (data.status === "failed") {
             setPhase("idle");
@@ -622,25 +660,53 @@ export default function AutoResearchPage() {
     es.onerror = () => {
       es.close();
       eventSourceRef.current = null;
-      // Poll on error — dialog might have finished while SSE dropped
-      api.dialogStatus(planId).then((ds) => {
-        if (ds.status === "failed") {
-          setPhase("idle");
-          setError(ds.error || "规划失败");
-          setPlanningEvents((prev) => [...prev, `❌ ${ds.error || "规划失败"}`]);
-        } else if (ds.status === "cancelled") {
-          setPhase("idle");
-          setError("研究已取消");
-          setPlanningEvents((prev) => [...prev, `⏹️ 研究已取消`]);
-        } else if (ds.status === "completed" && ds.run_id) {
-          setTaskId(ds.task_id);
-          setTaskTitle(ds.task_title ?? null);
-          setRunId(ds.run_id);
-          setPlanningEvents((prev) => [...prev, "✅ 研究引擎已启动"]);
-          setPhase("running");
-          startRunStream(ds.run_id!);
-        }
-      }).catch(() => {});
+      if (activePlanIdRef.current !== planId) return;
+
+      // Retry polling — dialog might have finished while SSE dropped
+      let pollCount = 0;
+      const maxPolls = 10;
+      const pollInterval = 2000;
+
+      const poll = () => {
+        if (activePlanIdRef.current !== planId) return;
+        api.dialogStatus(planId).then((ds) => {
+          if (activePlanIdRef.current !== planId) return;
+          if (ds.status === "failed") {
+            activePlanIdRef.current = null;
+            setPhase("idle");
+            setError(ds.error || "规划失败");
+            setPlanningEvents((prev) => [...prev, `❌ ${ds.error || "规划失败"}`]);
+          } else if (ds.status === "cancelled") {
+            activePlanIdRef.current = null;
+            setPhase("idle");
+            setError("研究已取消");
+            setPlanningEvents((prev) => [...prev, `⏹️ 研究已取消`]);
+          } else if (ds.status === "completed" && ds.run_id) {
+            activePlanIdRef.current = null;
+            setTaskId(ds.task_id);
+            setTaskTitle(ds.task_title ?? null);
+            setRunId(ds.run_id);
+            setPlanningEvents((prev) => [...prev, "✅ 研究引擎已启动"]);
+            setPhase("running");
+            startRunStream(ds.run_id!);
+          } else if (ds.status === "planning" || ds.status === "queued") {
+            // Still in progress — poll again
+            pollCount++;
+            if (pollCount < maxPolls) {
+              setTimeout(poll, pollInterval);
+            }
+          }
+        }).catch(() => {
+          // Poll failed — retry if within limit
+          if (activePlanIdRef.current !== planId) return;
+          pollCount++;
+          if (pollCount < maxPolls) {
+            setTimeout(poll, pollInterval);
+          }
+        });
+      };
+
+      poll();
     };
   }, [startRunStream]);
 
@@ -690,6 +756,7 @@ export default function AutoResearchPage() {
     }
     reconnectAttemptsRef.current = 0;
     activeRunIdRef.current = null;
+    activePlanIdRef.current = null;
     seenEventKeysRef.current.clear();
     if (runId && phase === "running") {
       void api.cancelRun(runId);
@@ -703,7 +770,7 @@ export default function AutoResearchPage() {
     setConnectionState("connected");
     setTask(null);
     setPlanningEvents([]);
-  }, [runId, runState]);
+  }, [runId, phase]);
 
   // ── Derived stats ──
   const baselineEval = task?.evaluation;
@@ -714,12 +781,12 @@ export default function AutoResearchPage() {
   const outcomes: ResearchRunOutcome[] = runState?.outcomes ?? [];
   const keptOutcomes = outcomes.filter((o) => o.status === "kept");
   const rejectedOutcomes = outcomes.filter((o) => o.status === "rejected");
-  const lastOutcome = outcomes[outcomes.length - 1];
-  const lastMetrics = (lastOutcome?.metrics ?? {}) as Record<string, unknown>;
-  const currentBugs: number = lastOutcome
+  const latestKeptOutcome = [...outcomes].reverse().find((o) => o.status === "kept");
+  const lastMetrics = (latestKeptOutcome?.metrics ?? {}) as Record<string, unknown>;
+  const currentBugs: number = latestKeptOutcome
     ? ((lastMetrics.bugs as number) ?? baselineBugs)
     : baselineBugs;
-  const currentScore: number = lastOutcome?.candidate_score ?? baselineScore;
+  const currentScore: number = latestKeptOutcome?.candidate_score ?? baselineScore;
   const currentRound: number = runState?.current_round ?? outcomes.length;
 
   const currentPhaseLabel = PHASE_LABELS[runState?.phase ?? ""] ?? runState?.phase ?? "运行中";
@@ -1323,7 +1390,7 @@ export default function AutoResearchPage() {
 
       {/* Controls */}
       <div style={{ marginTop: 16, display: "flex", justifyContent: "center", gap: 12 }}>
-        {phase === "done" && (
+        {["succeeded", "failed", "cancelled"].includes(phase) && (
           <Button type="primary" size="large" icon={<RocketOutlined />} onClick={reset}>
             开始新研究
           </Button>
