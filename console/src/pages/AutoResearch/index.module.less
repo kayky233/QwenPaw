@@ -1,0 +1,392 @@
+.container {
+  padding: 16px 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.hero {
+  text-align: center;
+  padding: 24px 0 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.card {
+  border-radius: 8px;
+  margin-bottom: 0;
+}
+
+.statCard {
+  border-radius: 8px;
+  text-align: center;
+}
+
+.controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+}
+
+.roundRow {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.roundRow:last-child {
+  border-bottom: none;
+}
+
+.codeBlock {
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  background: rgba(0, 0, 0, 0.2);
+  overflow-x: auto;
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.codeBlock code {
+  color: var(--text-color, #c9d1d9);
+}
+
+.lineNum {
+  display: inline-block;
+  width: 32px;
+  text-align: right;
+  margin-right: 12px;
+  color: rgba(255, 255, 255, 0.2);
+  font-size: 11px;
+  user-select: none;
+}
+
+.panel {
+  height: 100%;
+  border-radius: 8px;
+}
+
+// ── Live event stream (chat-like) ──
+
+.liveStream {
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+  }
+}
+
+.eventBubble {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  animation: fadeIn 0.25s ease;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.eventIcon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  margin-top: 1px;
+}
+
+.eventContent {
+  flex: 1;
+  min-width: 0;
+}
+
+.eventLabel {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.eventDetail {
+  font-size: 12px;
+  color: var(--text-secondary, #8b949e);
+  line-height: 1.5;
+  margin-top: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// Phase-specific bubble backgrounds
+.bubblePlanning {
+  background: rgba(88, 166, 255, 0.06);
+  border-color: rgba(88, 166, 255, 0.12);
+}
+
+.bubbleProposal {
+  background: rgba(163, 113, 247, 0.06);
+  border-color: rgba(163, 113, 247, 0.14);
+}
+
+.bubbleEvaluate {
+  background: rgba(210, 153, 29, 0.05);
+  border-color: rgba(210, 153, 29, 0.12);
+}
+
+.bubbleSuccess {
+  background: rgba(63, 185, 80, 0.05);
+  border-color: rgba(63, 185, 80, 0.12);
+}
+
+.bubbleError {
+  background: rgba(248, 81, 73, 0.06);
+  border-color: rgba(248, 81, 73, 0.14);
+}
+
+.bubbleDefault {
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+// ── Proposal reasoning card ──
+
+.proposalCard {
+  margin: 8px 0 12px;
+  border-radius: 6px;
+}
+
+.proposalText {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary, #8b949e);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// ── Improved code block ──
+
+.codeBlockWrapper {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  margin-bottom: 12px;
+}
+
+.codeBlockHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+  font-size: 12px;
+  color: var(--text-secondary, #8b949e);
+}
+
+.codeBlockBody {
+  padding: 12px 0;
+  overflow: auto;
+  max-height: 400px;
+}
+
+// ── Round summary inline ──
+
+.roundSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+// ── Improved idle input ──
+
+.idleWrapper {
+  padding: 16px 24px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.promptCard {
+  background: linear-gradient(135deg, rgba(88, 166, 255, 0.04) 0%, rgba(163, 113, 247, 0.03) 100%);
+}
+
+.suggestionTag {
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 12px;
+  transition: all 0.15s ease;
+
+  &:hover {
+    background: rgba(88, 166, 255, 0.15);
+    border-color: rgba(88, 166, 255, 0.3);
+  }
+}
+
+.modelTag {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// ── Light theme overrides ──
+:global(.ant-app.css-var.light) {
+  .container,
+  .idleWrapper {
+    --text-secondary: #656d76;
+  }
+
+  .codeBlock {
+    background: rgba(27, 31, 35, 0.04);
+    border-color: rgba(27, 31, 35, 0.08);
+
+    code {
+      color: #1f2328;
+    }
+
+    .lineNum {
+      color: rgba(27, 31, 35, 0.2);
+    }
+  }
+
+  .codeBlockHeader {
+    background: rgba(27, 31, 35, 0.04);
+    border-bottom-color: rgba(27, 31, 35, 0.06);
+    color: #656d76;
+  }
+
+  .codeBlockWrapper {
+    border-color: rgba(27, 31, 35, 0.08);
+  }
+
+  .liveStream {
+    &::-webkit-scrollbar-thumb {
+      background: rgba(27, 31, 35, 0.15);
+    }
+  }
+
+  .bubblePlanning {
+    background: rgba(9, 105, 218, 0.04);
+    border-color: rgba(9, 105, 218, 0.08);
+  }
+
+  .bubbleProposal {
+    background: rgba(130, 80, 223, 0.04);
+    border-color: rgba(130, 80, 223, 0.1);
+  }
+
+  .bubbleEvaluate {
+    background: rgba(191, 135, 0, 0.04);
+    border-color: rgba(191, 135, 0, 0.08);
+  }
+
+  .bubbleSuccess {
+    background: rgba(26, 127, 55, 0.04);
+    border-color: rgba(26, 127, 55, 0.08);
+  }
+
+  .bubbleError {
+    background: rgba(207, 34, 46, 0.04);
+    border-color: rgba(207, 34, 46, 0.1);
+  }
+
+  .bubbleDefault {
+    background: rgba(27, 31, 35, 0.02);
+    border-color: rgba(27, 31, 35, 0.04);
+  }
+
+  .controls {
+    border-top-color: rgba(27, 31, 35, 0.08);
+  }
+
+  .roundRow {
+    border-bottom-color: rgba(27, 31, 35, 0.08);
+  }
+
+  .promptCard {
+    background: linear-gradient(135deg, rgba(9, 105, 218, 0.03) 0%, rgba(130, 80, 223, 0.02) 100%);
+  }
+
+  .suggestionTag:hover {
+    background: rgba(9, 105, 218, 0.1);
+    border-color: rgba(9, 105, 218, 0.25);
+  }
+}
+
+// ── Mobile responsive ──
+@media (max-width: 768px) {
+  .container {
+    padding: 8px 12px;
+  }
+
+  .idleWrapper {
+    padding: 8px 12px;
+    max-width: 100%;
+  }
+
+  .hero {
+    padding: 16px 0 8px;
+
+    h2 {
+      font-size: 20px !important;
+    }
+  }
+
+  .controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .liveStream {
+    max-height: 320px;
+  }
+
+  .codeBlock {
+    font-size: 11px;
+    max-height: 320px;
+  }
+
+  .eventBubble {
+    padding: 8px 10px;
+  }
+
+  .eventDetail {
+    font-size: 11px;
+  }
+
+  .roundRow {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

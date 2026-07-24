@@ -2427,6 +2427,11 @@ export default function ChatPage() {
         value: "__loop__goal",
         description: t("chat.commands.goal.description"),
       },
+      {
+        command: "/research",
+        value: "research",
+        description: t("chat.commands.research.description"),
+      },
     ];
     const reservedCommands = new Set(
       commandSuggestions.map((item) => item.command.slice(1).trim()),

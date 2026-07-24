@@ -37,6 +37,7 @@ export { default as SubmitToAgentCard } from "./SubmitToAgentCard";
 export { default as CheckAgentTaskCard } from "./CheckAgentTaskCard";
 export { default as DelegateExternalAgentCard } from "./DelegateExternalAgentCard";
 export { default as MaterializeSkillCard } from "./MaterializeSkillCard";
+export { default as AutoResearchCard } from "./AutoResearchCard";
 export { default as ShellCard } from "./ShellCard";
 export { default as GenericToolCard } from "./GenericToolCard";
 
@@ -62,6 +63,7 @@ import SubmitToAgentCard from "./SubmitToAgentCard";
 import CheckAgentTaskCard from "./CheckAgentTaskCard";
 import DelegateExternalAgentCard from "./DelegateExternalAgentCard";
 import MaterializeSkillCard from "./MaterializeSkillCard";
+import AutoResearchCard from "./AutoResearchCard";
 import ShellCard from "./ShellCard";
 
 // ── Common props type ─────────────────────────────────────────────────
@@ -124,6 +126,9 @@ export const BUILTIN_CARD_REGISTRY: Record<string, BuiltinCardComponent> = {
 
   // Skills
   materialize_skill: MaterializeSkillCard,
+
+  // Research
+  auto_research: AutoResearchCard,
 
   // Shell
   execute_shell_command: ShellCard,

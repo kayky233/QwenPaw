@@ -26,6 +26,7 @@ import Chat from "../../pages/Chat";
 import CodingPage from "../../pages/Coding";
 
 // Lazy pages
+const AutoResearchPage = lazyImportWithRetry("../../pages/AutoResearch");
 const ChannelsPage = lazyImportWithRetry("../../pages/Control/Channels");
 const SessionsPage = lazyImportWithRetry("../../pages/Control/Sessions");
 const InboxPage = lazyImportWithRetry("../../pages/Inbox");
@@ -82,6 +83,7 @@ export const BUILTIN_ROUTES: Route[] = [
   { id: "core.root", path: "/", component: DefaultRedirect },
   { id: "core.chat", path: "/chat/*", component: Chat },
   { id: "core.coding", path: "/coding/*", component: CodingPage },
+  { id: "core.auto-research", path: "/auto-research", component: AutoResearchPage },
   { id: "core.channels", path: "/channels", component: ChannelsPage },
   { id: "core.sessions", path: "/sessions", component: SessionsPage },
   { id: "core.inbox", path: "/inbox", component: InboxPage },

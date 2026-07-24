@@ -55,9 +55,21 @@ export interface PendingApproval {
   similar_target?: string;
 }
 
+export interface CacheStats {
+  total_requests: number;
+  estimated_hits: number;
+  hit_rate: number;
+  prefix_tokens_p50: number;
+  canonicalization_active: boolean;
+}
+
 export const consoleApi = {
   getPushMessages: (sessionId?: string) =>
-    request<{ messages: PushMessage[]; pending_approvals: PendingApproval[] }>(
+    request<{
+      messages: PushMessage[];
+      pending_approvals: PendingApproval[];
+      cache_stats?: CacheStats;
+    }>(
       sessionId
         ? `/console/push-messages?session_id=${sessionId}`
         : "/console/push-messages",

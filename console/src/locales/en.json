@@ -80,7 +80,8 @@
     "debug": "Debug",
     "plugins": "Plugins",
     "backups": "Backups",
-    "pluginManager": "Plugin Manager"
+    "pluginManager": "Plugin Manager",
+    "autoResearch": "Auto Research"
   },
   "sidebar": {
     "newVersion": "New version available: v{{version}}, click to upgrade",
@@ -2239,6 +2240,9 @@
       },
       "goal": {
         "description": "Goal loop — Agent pursues a goal continuously, auto-evaluates via Rubric"
+      },
+      "research": {
+        "description": "AutoResearch — run trusted preconfigured evaluators and keep improvements"
       }
     },
     "attachments": {

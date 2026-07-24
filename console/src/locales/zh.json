@@ -80,7 +80,8 @@
     "debug": "调试",
     "plugins": "插件",
     "backups": "备份",
-    "pluginManager": "插件管理"
+    "pluginManager": "插件管理",
+    "autoResearch": "自动研究"
   },
   "sidebar": {
     "newVersion": "发现新版本 v{{version}}，点击前往升级",
@@ -2098,6 +2099,9 @@
       },
       "goal": {
         "description": "Goal循环 — Agent围绕目标持续执行，通过Rubric评估自动判断完成"
+      },
+      "research": {
+        "description": "自动研究 — 运行预先配置的可信评测任务并保留改进"
       }
     },
     "attachments": {

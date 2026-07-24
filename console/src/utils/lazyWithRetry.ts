@@ -17,7 +17,7 @@ const RETRY_DELAY_MS = 1000;
 function pathToModuleKey(importPath: string): string {
   const key = importPath.replace(/^.*\/pages\//, "").replace(/\.[^.]+$/, "");
   // Bare-directory imports are registered as "<Dir>/index" in registerHostModules
-  return key.includes("/") && !/\/index$/.test(key) ? `${key}/index` : key;
+  return /\/index$/.test(key) ? key : `${key}/index`;
 }
 
 function retryImport<T extends ComponentType<unknown>>(

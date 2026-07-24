@@ -180,6 +180,15 @@ export const BUILTIN_MENU: MenuItem[] = [
     route: "core.agent-stats",
     order: 70,
   },
+  {
+    id: "core.auto-research",
+    location: "primary.agentScoped",
+    parentId: "core.agent-group",
+    label: navLabel("nav.autoResearch", "Auto Research"),
+    icon: SparkBrowseLine,
+    route: "core.auto-research",
+    order: 80,
+  },
 
   // ── Settings (Sidebar Menu #2) ───────────────────────────────────────────
   {
