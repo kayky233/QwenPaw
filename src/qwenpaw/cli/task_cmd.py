@@ -137,15 +137,18 @@ async def _run_task(
         try:
             response = await asyncio.wait_for(
                 agent.reply(
-                    [Msg(name="user", role="user", content=instruction)],
+                    [Msg(name="user", role="user", content=[{"type": "text", "text": instruction}])],
                 ),
                 timeout=timeout,
             )
             elapsed = time.monotonic() - t0
+            response_text = response.get_text_content() if response else ""
             result: dict = {
                 "status": "success",
                 "elapsed_seconds": round(elapsed, 2),
-                "response": (response.get_text_content() if response else ""),
+                "response": response_text,
+                "response_length": len(response_text),
+                "instruction_length": len(instruction),
             }
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - t0
@@ -154,6 +157,8 @@ async def _run_task(
                 "elapsed_seconds": round(elapsed, 2),
                 "timeout_seconds": timeout,
                 "response": "",
+                "response_length": 0,
+                "instruction_length": len(instruction),
             }
         except Exception as exc:
             elapsed = time.monotonic() - t0
@@ -162,12 +167,18 @@ async def _run_task(
                 "elapsed_seconds": round(elapsed, 2),
                 "error": str(exc),
                 "response": "",
+                "response_length": 0,
+                "instruction_length": len(instruction),
             }
 
+    # ── Extract model metadata and token usage ──
     usage: dict = {}
+    model_info: dict = {}
     try:
         model = getattr(agent, "model", None)
         if model is not None:
+            model_info["model_name"] = getattr(model, "model_name", "unknown")
+            model_info["api_url"] = getattr(model, "api_url", "unknown")
             monitor = getattr(model, "monitor", None)
             if monitor is not None:
                 metrics = (
@@ -179,8 +190,29 @@ async def _run_task(
                 usage["output_tokens"] = metrics.get("completion_tokens", 0)
                 usage["cost_usd"] = metrics.get("cost_usd")
     except Exception:
-        logger.debug("Failed to extract token usage", exc_info=True)
+        logger.debug("Failed to extract token usage / model info", exc_info=True)
     result["usage"] = usage
+    result["model_info"] = model_info
+
+    # Log the full raw response at debug level for troubleshooting
+    response_text = result.get("response", "")
+    _log = logging.getLogger(__name__)
+    _log.info(
+        "_run_task completed: status=%s, model=%s, elapsed=%.1fs, "
+        "instr_len=%d, resp_len=%d, tokens_in=%s, tokens_out=%s",
+        result["status"],
+        model_info.get("model_name", "?"),
+        result.get("elapsed_seconds", 0),
+        len(instruction),
+        len(response_text),
+        usage.get("input_tokens", "?"),
+        usage.get("output_tokens", "?"),
+    )
+    if response_text and len(response_text) < 200:
+        _log.warning(
+            "Short LLM response (%d chars): %r",
+            len(response_text), response_text,
+        )
 
     if output_dir:
         out = Path(output_dir)

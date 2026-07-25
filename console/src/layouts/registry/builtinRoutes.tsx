@@ -55,6 +55,7 @@ const PluginManagerPage = lazyImportWithRetry(
   "../../pages/Settings/PluginManager",
 );
 const AppCenterPage = lazyImportWithRetry("../../pages/AppCenter");
+const AutoResearchPage = lazyImportWithRetry("../../pages/AutoResearch");
 
 /**
  * "/" lands here. Waits for useSyncCodingMode to populate the store before
@@ -123,13 +124,12 @@ export const BUILTIN_ROUTES: Route[] = [
     component: PluginManagerPage,
   },
   { id: "core.app-center", path: "/apps", component: AppCenterPage },
-  // Deep-link / refresh target: `/apps/<id>` also lands on the App Center,
-  // which opens the app inline (with the “← App Center” bar) from the URL.
   {
     id: "core.app-center.embed",
     path: "/apps/:appId",
     component: AppCenterPage,
   },
+  { id: "core.auto-research", path: "/auto-research", component: AutoResearchPage },
 ];
 
 routeRegistry.addBuiltin(BUILTIN_ROUTES);

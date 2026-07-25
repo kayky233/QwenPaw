@@ -28,6 +28,7 @@ import { languageApi } from "./modules/language";
 import { backupApi } from "./modules/backup";
 import { consoleApi } from "./modules/console";
 import { accessControlApi } from "./modules/accessControl";
+import { researchApi } from "./modules/research";
 
 export const api = {
   // Root
@@ -99,6 +100,9 @@ export const api = {
 
   // Access Control
   ...accessControlApi,
+
+  // Auto Research
+  ...researchApi,
 };
 
 export default api;
