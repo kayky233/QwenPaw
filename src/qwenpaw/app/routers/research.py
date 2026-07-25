@@ -113,7 +113,7 @@ _runtime_tasks: dict[str, asyncio.Task[None]] = {}
 _run_auto_pr: dict[str, bool] = {}
 _dialog_runs: dict[str, DialogRunState] = {}
 _dialog_tasks: dict[str, asyncio.Task[None]] = {}
-_dialog_sse_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+_dialog_sse_queues: dict[str, set[asyncio.Queue[dict[str, Any] | None]]] = {}
 
 
 def _owner_identity() -> tuple[str, str | None, str | None]:
@@ -334,6 +334,46 @@ def _report_progress(run_id: str, progress: tuple[int, str, str]) -> None:
     _report_event(run_id, phase, round_number, detail)
 
 
+def _finish_run(
+    run_id: str,
+    status: str,
+    error: str = "",
+    *,
+    allow_overwrite: bool = False,
+) -> None:
+    """Safely transition a run to a terminal status.
+
+    Only transitions from non-terminal states (queued, running), or when
+    explicitly told to overwrite (e.g. cancel overrides completed).
+    """
+    existing = _runs.get(run_id)
+    if existing is None:
+        return
+    if existing.status in {"completed", "failed", "cancelled", "auth_required"} and not allow_overwrite:
+        _log.warning(
+            "_finish_run: refusing to transition run %s from %s to %s",
+            run_id,
+            existing.status,
+            status,
+        )
+        return
+    _runs[run_id] = replace(
+        existing,
+        status=status,
+        finished_at=_utc_now(),
+        error=error or existing.error,
+        updated_at=_utc_now(),
+    )
+    # Record terminal event in the run's event log
+    _report_event(run_id, status, detail=error)
+    # Send terminal SSE events for frontend consumption
+    _sse_broadcast(
+        run_id,
+        {"type": f"run.{status}", "run_id": run_id, "status": status, "error": error},
+    )
+    _sse_close(run_id)
+
+
 async def _execute_run(
     run_id: str,
     task_dir: Path,
@@ -380,50 +420,23 @@ async def _execute_run(
         if submission is not None:
             _runs[run_id] = replace(_runs[run_id], submission=submission)
             if submission.status == "auth_required":
-                _report_event(run_id, "auth_required", detail=submission.verdict)
-                _runs[run_id] = replace(
-                    _runs[run_id],
-                    status="auth_required",
-                    finished_at=_utc_now(),
-                    error="LeetCode authentication is required",
-                )
+                _finish_run(run_id, "auth_required", error="LeetCode authentication is required")
                 return
             if submission.status != "accepted":
                 detail = submission.verdict or submission.error
-                _report_event(run_id, "submission_failed", detail=detail)
-                _runs[run_id] = replace(
-                    _runs[run_id],
-                    status="failed",
-                    finished_at=_utc_now(),
-                    error=detail or "Remote submission failed",
-                )
+                _finish_run(run_id, "failed", error=detail or "Remote submission failed")
                 return
             _report_event(run_id, "accepted", detail=submission.verdict)
-        _report_event(run_id, "completed")
-        _runs[run_id] = replace(
-            _runs[run_id],
-            status="completed",
-            finished_at=_utc_now(),
-        )
+        _finish_run(run_id, "completed")
         # Attempt PR creation after successful research
-        await _try_create_pr(run_id, run.task_id)
+        run_state = _runs.get(run_id)
+        if run_state is not None:
+            await _try_create_pr(run_id, run_state.task_id)
     except asyncio.CancelledError:
         if _runs[run_id].status != "cancelled":
-            _report_event(run_id, "cancelled")
-            _runs[run_id] = replace(
-                _runs[run_id],
-                status="cancelled",
-                finished_at=_utc_now(),
-                error="Research run was cancelled",
-            )
+            _finish_run(run_id, "cancelled", error="Research run was cancelled", allow_overwrite=True)
     except Exception as exc:
-        _report_event(run_id, "failed", detail=f"{type(exc).__name__}: {exc}")
-        _runs[run_id] = replace(
-            _runs[run_id],
-            status="failed",
-            finished_at=_utc_now(),
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        _finish_run(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
     finally:
         _runtime_tasks.pop(run_id, None)
 
@@ -482,13 +495,11 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
     run = _owned_run(run_id)
     if run.status not in {"queued", "running"}:
         raise HTTPException(status_code=409, detail="Research run is not active")
-    _report_event(run_id, "cancelled")
-    _runs[run_id] = replace(
-        _runs[run_id],
-        status="cancelled",
-        finished_at=_utc_now(),
-        error="Research run was cancelled",
-    )
+    _finish_run(run_id, "cancelled", error="Research run was cancelled", allow_overwrite=True)
+    task = _runtime_tasks.pop(run_id, None)
+    if task is not None:
+        task.cancel()
+    return _run_payload(_runs[run_id])
     task = _runtime_tasks.pop(run_id, None)
     if task is not None:
         task.cancel()
@@ -930,15 +941,26 @@ def _parse_planning_output(response: str, goal: str = "") -> dict[str, str]:
 
 
 def _dialog_broadcast(plan_id: str, event: dict[str, Any]) -> None:
-    q = _dialog_sse_queues.get(plan_id)
-    if q is not None:
-        q.put_nowait(event)
+    queues = _dialog_sse_queues.get(plan_id)
+    if queues:
+        dead: list[asyncio.Queue[dict[str, Any] | None]] = []
+        for q in queues:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            queues.discard(q)
 
 
 def _dialog_close(plan_id: str) -> None:
-    q = _dialog_sse_queues.pop(plan_id, None)
-    if q is not None:
-        q.put_nowait(None)
+    queues = _dialog_sse_queues.pop(plan_id, None)
+    if queues:
+        for q in queues:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
 
 
 def _dialog_emit(plan_id: str, phase: str, detail: str = "") -> None:
@@ -1455,35 +1477,33 @@ async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
     if not ds:
         raise HTTPException(status_code=404, detail="Unknown dialog plan")
 
-    q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-    existing = _dialog_sse_queues.get(plan_id)
-    if existing is not None:
-        q = existing
-    else:
-        _dialog_sse_queues[plan_id] = q
+    q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
+    if plan_id not in _dialog_sse_queues:
+        _dialog_sse_queues[plan_id] = set()
+    _dialog_sse_queues[plan_id].add(q)
 
     async def event_generator():
         import json
 
-        # Replay existing events
-        for evt in ds.events:
-            yield f"data: {json.dumps({'type': 'event', 'phase': evt['phase'], 'detail': evt.get('detail', '')})}\n\n"
-
-        # If already completed/failed, send final event and close
-        if ds.status in ("completed", "failed"):
-            final = {
-                "type": "done",
-                "status": ds.status,
-                "task_id": ds.task_id,
-                "task_title": ds.task_title,
-                "run_id": ds.run_id,
-                "error": ds.error,
-            }
-            yield f"data: {json.dumps(final)}\n\n"
-            return
-
-        # Stream live
         try:
+            # Replay existing events
+            for evt in ds.events:
+                yield f"data: {json.dumps({'type': 'event', 'phase': evt['phase'], 'detail': evt.get('detail', '')})}\n\n"
+
+            # If already completed/failed, send final event and close
+            if ds.status in ("completed", "failed"):
+                final = {
+                    "type": "done",
+                    "status": ds.status,
+                    "task_id": ds.task_id,
+                    "task_title": ds.task_title,
+                    "run_id": ds.run_id,
+                    "error": ds.error,
+                }
+                yield f"data: {json.dumps(final)}\n\n"
+                return
+
+            # Stream live
             while True:
                 if await request.is_disconnected():
                     break
@@ -1508,6 +1528,12 @@ async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
                 yield f"data: {json.dumps(item)}\n\n"
         except asyncio.CancelledError:
             pass
+        finally:
+            queues = _dialog_sse_queues.get(plan_id)
+            if queues is not None:
+                queues.discard(q)
+                if not queues:
+                    _dialog_sse_queues.pop(plan_id, None)
 
     return StreamingResponse(
         event_generator(),
@@ -1522,21 +1548,32 @@ async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
 
 # ── SSE stream for live research progress ──────────────────────────────────
 
-_sse_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+_sse_queues: dict[str, set[asyncio.Queue[dict[str, Any] | None]]] = {}
 
 
 def _sse_broadcast(run_id: str, event: dict[str, Any]) -> None:
     """Push a JSON-serialisable event to every subscriber of this run."""
-    q = _sse_queues.get(run_id)
-    if q is not None:
-        q.put_nowait(event)
+    queues = _sse_queues.get(run_id)
+    if queues:
+        dead: list[asyncio.Queue[dict[str, Any] | None]] = []
+        for q in queues:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            queues.discard(q)
 
 
 def _sse_close(run_id: str) -> None:
     """Signal all subscribers that the stream is complete."""
-    q = _sse_queues.pop(run_id, None)
-    if q is not None:
-        q.put_nowait(None)
+    queues = _sse_queues.pop(run_id, None)
+    if queues:
+        for q in queues:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
 
 
 # Hook into existing _report_event to also broadcast via SSE
@@ -1585,29 +1622,27 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
     """SSE endpoint: streams live events and outcomes as they happen."""
     run = _owned_run(run_id)
 
-    # Create a queue for this subscriber
-    q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    # Create a dedicated queue for this subscriber
+    q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
 
-    # If a queue already exists, reuse it; otherwise register new one
-    existing = _sse_queues.get(run_id)
-    if existing is not None:
-        q = existing
-    else:
-        _sse_queues[run_id] = q
+    # Register this queue in the broadcast set
+    if run_id not in _sse_queues:
+        _sse_queues[run_id] = set()
+    _sse_queues[run_id].add(q)
 
     async def event_generator():
         import json
 
-        # Replay existing events for late subscribers
-        for event in run.events:
-            yield f"data: {json.dumps({'type': 'event', 'phase': event.phase, 'round': event.round, 'detail': event.detail})}\n\n"
-
-        # Replay existing outcomes
-        for outcome in run.outcomes:
-            yield f"data: {json.dumps({'type': 'outcome', 'outcome': asdict(outcome)})}\n\n"
-
-        # Stream live events
         try:
+            # Replay existing events for late subscribers
+            for event in run.events:
+                yield f"data: {json.dumps({'type': 'event', 'phase': event.phase, 'round': event.round, 'detail': event.detail})}\n\n"
+
+            # Replay existing outcomes
+            for outcome in run.outcomes:
+                yield f"data: {json.dumps({'type': 'outcome', 'outcome': asdict(outcome)})}\n\n"
+
+            # Stream live events
             while True:
                 if await request.is_disconnected():
                     break
@@ -1619,12 +1654,18 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
                     continue
                 if item is None:
                     # Stream complete
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     break
                 yield f"data: {json.dumps(item)}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
-            pass  # Don't remove the queue — other subscribers may be listening
+            # Remove this subscriber's queue on disconnect
+            queues = _sse_queues.get(run_id)
+            if queues is not None:
+                queues.discard(q)
+                if not queues:
+                    _sse_queues.pop(run_id, None)
 
     return StreamingResponse(
         event_generator(),
