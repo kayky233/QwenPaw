@@ -68,6 +68,13 @@ class ResearchRunEvent:
     timestamp: str
     round: int | None = None
     detail: str = ""
+    sequence: int = 0  # monotonic, for dedup & after_sequence resumption
+
+
+# ── Terminal run statuses — completed runs should immediately close SSE ──
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "cancelled", "auth_required"}
+)
 
 
 @dataclass
@@ -218,7 +225,8 @@ def _report_event(
     if current is None:
         return
     now = _utc_now()
-    event = ResearchRunEvent(phase, now, round_number, detail)
+    seq = len(current.events)
+    event = ResearchRunEvent(phase, now, round_number, detail, seq)
     _runs[run_id] = replace(
         current,
         events=(*current.events, event),
@@ -1618,9 +1626,33 @@ def _report_outcome_sse(run_id: str, outcome: ResearchOutcome) -> None:
 
 
 @router.get("/runs/{run_id}/stream")
-async def stream_run(run_id: str, request: Request) -> StreamingResponse:
-    """SSE endpoint: streams live events and outcomes as they happen."""
+async def stream_run(
+    run_id: str,
+    request: Request,
+    after_sequence: int = -1,
+) -> StreamingResponse:
+    """SSE endpoint: streams live events and outcomes as they happen.
+
+    Query params:
+        after_sequence: skip events with sequence <= this value (resumption).
+    """
     run = _owned_run(run_id)
+
+    # ── Terminal run: immediately send final status and close ──
+    if run.status in _TERMINAL_STATUSES:
+        async def terminal_generator():
+            import json  # noqa: F811
+            yield f"data: {json.dumps({'type': f'run.{run.status}', 'status': run.status, 'error': run.error})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return StreamingResponse(
+            terminal_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # Create a dedicated queue for this subscriber
     q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
@@ -1631,12 +1663,12 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
     _sse_queues[run_id].add(q)
 
     async def event_generator():
-        import json
-
         try:
-            # Replay existing events for late subscribers
+            # Replay existing events for late subscribers (respect after_sequence)
             for event in run.events:
-                yield f"data: {json.dumps({'type': 'event', 'phase': event.phase, 'round': event.round, 'detail': event.detail})}\n\n"
+                if event.sequence <= after_sequence:
+                    continue
+                yield f"data: {json.dumps({'type': 'event', 'phase': event.phase, 'round': event.round, 'detail': event.detail, 'sequence': event.sequence})}\n\n"
 
             # Replay existing outcomes
             for outcome in run.outcomes:

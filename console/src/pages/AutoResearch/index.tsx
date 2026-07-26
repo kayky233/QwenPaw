@@ -43,6 +43,7 @@ import {
   CopyOutlined,
 } from "@ant-design/icons";
 import { api, getApiUrl } from "@/api";
+import { buildAuthHeaders } from "@/api/authHeaders";
 import type {
   ResearchTaskDetail,
   ResearchRunState,
@@ -330,16 +331,21 @@ export default function AutoResearchPage() {
 
   const [planningEvents, setPlanningEvents] = useState<string[]>([]);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // Separate EventSource for dialog planning SSE (not migrated to fetch-based yet)
+  const dialogEventSourceRef = useRef<EventSource | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const activeRunIdRef = useRef<string | null>(null);
   const activePlanIdRef = useRef<string | null>(null);
-  const seenEventKeysRef = useRef<Set<string>>(new Set());
+  // Last received event sequence for resumption
+  const lastEventSequenceRef = useRef(-1);
   // Ref to break circular dependency between scheduleReconnect and connectSSE
   const connectSSERef = useRef<((rId: string) => void) | null>(null);
+  // Track when the last SSE event was received (for "last synced" display)
+  const lastSyncedAtRef = useRef<string>("");
 
   // ── Schedule SSE reconnection with exponential backoff ──
   const scheduleReconnect = useCallback((rId: string) => {
@@ -377,182 +383,211 @@ export default function AutoResearchPage() {
   // ── Cleanup SSE and reconnect timers ──
   useEffect(() => {
     return () => {
-      eventSourceRef.current?.close();
+      abortRef.current?.abort();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
     };
   }, []);
 
-  // ── Connect SSE for a run ──
+  // ── Connect SSE for a run (fetch-based to support auth headers) ──
   const connectSSE = useCallback((rId: string) => {
-    // Track active run to prevent stale callbacks
     activeRunIdRef.current = rId;
-    // NOTE: Do NOT reset reconnectAttemptsRef here — that would forever
-    // prevent the 5-retry limit from being reached (each reconnect would
-    // start counting from 0 again). Only reset in es.onopen (success)
-    // and startRunStream (fresh task).
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
 
-    eventSourceRef.current?.close();
-    const sseUrl = getApiUrl(`/research/runs/${rId}/stream`);
-    const es = new EventSource(sseUrl);
-    eventSourceRef.current = es;
+    // Abort any previous connection
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-    es.onopen = () => {
-      reconnectAttemptsRef.current = 0;
-      setConnectionState("connected");
-    };
+    const afterSeq = lastEventSequenceRef.current;
+    const params = new URLSearchParams();
+    if (afterSeq >= 0) params.set("after_sequence", String(afterSeq));
+    const qs = params.toString();
+    const sseUrl = getApiUrl(`/research/runs/${rId}/stream`) + (qs ? `?${qs}` : "");
 
-    es.onmessage = (event) => {
-      // Guard: stale EventSource or stale run
-      if (activeRunIdRef.current !== rId || eventSourceRef.current !== es) return;
+    (async () => {
       try {
-        const data = JSON.parse(event.data);
+        const response = await fetch(sseUrl, {
+          headers: buildAuthHeaders(),
+          signal: controller.signal,
+        });
 
-        // Deduplicate events by server-timestamp + phase + round + detail
-        if (data.type === "event") {
-          const dedupKey = JSON.stringify([
-            data.phase,
-            data.round ?? null,
-            data.timestamp ?? null,
-            data.detail ?? "",
-          ]);
-          if (seenEventKeysRef.current.has(dedupKey)) return;
-          // Limit cache size: trim to 1000 most recent when > 2000
-          if (seenEventKeysRef.current.size > 2000) {
-            const recentKeys = Array.from(seenEventKeysRef.current).slice(-1000);
-            seenEventKeysRef.current = new Set(recentKeys);
+        if (!response.ok) {
+          // Auth failure (401/403) or not found (404) — don't retry
+          if (response.status === 401 || response.status === 403 || response.status === 404) {
+            setConnectionState("disconnected");
+            setError(`SSE 连接被拒绝 (${response.status})，请检查权限或刷新页面。`);
+            return;
           }
-          seenEventKeysRef.current.add(dedupKey);
+          throw new Error(`SSE HTTP ${response.status}`);
         }
 
-        if (data.type === "event") {
-          setRunState((prev) => {
-            const newEvent = {
-              phase: data.phase,
-              timestamp: data.timestamp ?? new Date().toISOString(),
-              round: data.round,
-              detail: data.detail || "",
-            };
-            if (!prev) {
-              // First event: build initial state from event data
-              return {
-                id: rId,
-                task_id: "",
-                agent_id: "",
-                status: "running",
-                phase: data.phase,
-                rounds: 0,
-                current_round: data.round ?? null,
-                completed_rounds: 0,
-                events: [newEvent],
-                outcomes: [],
-                created_at: data.timestamp ?? new Date().toISOString(),
-                updated_at: data.timestamp ?? new Date().toISOString(),
-                started_at: null,
-                finished_at: null,
-                error: "",
-              };
-            }
-            return {
-              ...prev,
-              phase: data.phase,
-              current_round: data.round ?? prev.current_round,
-              events: [...prev.events, newEvent],
-              updated_at: data.timestamp ?? new Date().toISOString(),
-            };
-          });
-        } else if (data.type === "outcome") {
-          setRunState((prev) => {
-            const outcome = data.outcome as ResearchRunOutcome;
-            if (!prev) {
-              return {
-                id: rId,
-                task_id: "",
-                agent_id: "",
-                status: "running",
-                phase: data.phase ?? "evaluating_candidate",
-                rounds: 0,
-                current_round: outcome.round ?? null,
-                completed_rounds: 1,
-                events: [],
-                outcomes: [outcome],
-                created_at: data.timestamp ?? new Date().toISOString(),
-                updated_at: data.timestamp ?? new Date().toISOString(),
-                started_at: null,
-                finished_at: null,
-                error: "",
-              };
-            }
-            // Upsert with deep merge: preserve partial metrics from earlier updates
-            const idx = prev.outcomes.findIndex((o) => o.round === outcome.round);
-            const newOutcomes =
-              idx === -1
-                ? [...prev.outcomes, outcome].sort((a, b) => a.round - b.round)
-                : prev.outcomes.map((o, i) =>
-                    i === idx
-                      ? {
-                          ...o,
-                          ...outcome,
-                          metrics: {
-                            ...((o.metrics ?? {}) as Record<string, unknown>),
-                            ...((outcome.metrics ?? {}) as Record<string, unknown>),
-                          },
-                        }
-                      : o,
-                  );
-            // Recalculate completed_rounds from unique statuses, not array length
-            const done = newOutcomes.filter(
-              (item) =>
-                item.status === "kept" ||
-                item.status === "rejected" ||
-                (item.status ?? "").endsWith("_error"),
-            ).length;
-            return {
-              ...prev,
-              outcomes: newOutcomes,
-              completed_rounds: done,
-              updated_at: data.timestamp ?? new Date().toISOString(),
-            };
-          });
-        } else if (data.type === "done" || data.type === "run.completed" || data.type === "run.failed" || data.type === "run.cancelled") {
-          es.close();
-          eventSourceRef.current = null;
-          setConnectionState("connected");
-          if (data.type === "run.completed" || data.status === "completed") {
-            setPhase("succeeded");
-          } else if (data.type === "run.cancelled" || data.status === "cancelled") {
-            setPhase("cancelled");
-            setError(data.error ?? "研究已取消");
-          } else {
-            setPhase("failed");
-            setError(data.error ?? "研究执行失败");
-          }
-          return;
-        }
-      } catch {
-        // ignore parse errors
-      }
-    };
+        setConnectionState("connected");
+        reconnectAttemptsRef.current = 0;
 
-    es.onerror = () => {
-      // Guard: stale EventSource
-      if (activeRunIdRef.current !== rId || eventSourceRef.current !== es) return;
-      es.close();
-      eventSourceRef.current = null;
-      // Attempt reconnection — the server may still be running
-      if (reconnectAttemptsRef.current < 5) {
-        scheduleReconnect(rId);
-      } else {
-        // Max retries exhausted — connection lost, but task may still be running
-        setConnectionState("disconnected");
-        setError("实时连接已断开，研究任务可能仍在后台运行。请手动恢复连接或重新开始。");
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No response body");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          // Keep incomplete last line in buffer
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice(6);
+            if (!payload) continue;
+
+            let data: Record<string, unknown>;
+            try {
+              data = JSON.parse(payload);
+            } catch {
+              continue;
+            }
+
+            // Guard: stale connection
+            if (activeRunIdRef.current !== rId || abortRef.current !== controller) return;
+
+            if (data.type === "event") {
+              // Use sequence for dedup
+              if (typeof data.sequence === "number") {
+                if (data.sequence <= afterSeq) continue;
+                lastEventSequenceRef.current = data.sequence as number;
+              }
+              lastSyncedAtRef.current = new Date().toISOString();
+
+              setRunState((prev) => {
+                const newEvent = {
+                  phase: data.phase as string,
+                  timestamp: (data.timestamp as string) ?? new Date().toISOString(),
+                  round: data.round as number | null | undefined,
+                  detail: (data.detail as string) || "",
+                  sequence: data.sequence as number,
+                };
+                if (!prev) {
+                  return {
+                    id: rId,
+                    task_id: "",
+                    agent_id: "",
+                    status: "running",
+                    phase: data.phase as string,
+                    rounds: 0,
+                    current_round: (data.round as number) ?? null,
+                    completed_rounds: 0,
+                    events: [newEvent],
+                    outcomes: [],
+                    created_at: (data.timestamp as string) ?? new Date().toISOString(),
+                    updated_at: (data.timestamp as string) ?? new Date().toISOString(),
+                    started_at: null,
+                    finished_at: null,
+                    error: "",
+                  };
+                }
+                return {
+                  ...prev,
+                  phase: data.phase as string,
+                  current_round: (data.round as number) ?? prev.current_round,
+                  events: [...prev.events, newEvent],
+                  updated_at: (data.timestamp as string) ?? new Date().toISOString(),
+                };
+              });
+            } else if (data.type === "outcome") {
+              lastSyncedAtRef.current = new Date().toISOString();
+              setRunState((prev) => {
+                const outcome = data.outcome as ResearchRunOutcome;
+                if (!prev) {
+                  return {
+                    id: rId,
+                    task_id: "",
+                    agent_id: "",
+                    status: "running",
+                    phase: (data.phase as string) ?? "evaluating_candidate",
+                    rounds: 0,
+                    current_round: (outcome.round as number) ?? null,
+                    completed_rounds: 1,
+                    events: [],
+                    outcomes: [outcome],
+                    created_at: (data.timestamp as string) ?? new Date().toISOString(),
+                    updated_at: (data.timestamp as string) ?? new Date().toISOString(),
+                    started_at: null,
+                    finished_at: null,
+                    error: "",
+                  };
+                }
+                const idx = prev.outcomes.findIndex((o) => o.round === outcome.round);
+                const newOutcomes =
+                  idx === -1
+                    ? [...prev.outcomes, outcome].sort((a, b) => a.round - b.round)
+                    : prev.outcomes.map((o, i) =>
+                        i === idx
+                          ? {
+                              ...o,
+                              ...outcome,
+                              metrics: {
+                                ...((o.metrics ?? {}) as Record<string, unknown>),
+                                ...((outcome.metrics ?? {}) as Record<string, unknown>),
+                              },
+                            }
+                          : o,
+                      );
+                const done = newOutcomes.filter(
+                  (item) =>
+                    item.status === "kept" ||
+                    item.status === "rejected" ||
+                    (item.status ?? "").endsWith("_error"),
+                ).length;
+                return {
+                  ...prev,
+                  outcomes: newOutcomes,
+                  completed_rounds: done,
+                  updated_at: (data.timestamp as string) ?? new Date().toISOString(),
+                };
+              });
+            } else if (
+              data.type === "done" ||
+              data.type === "run.completed" ||
+              data.type === "run.failed" ||
+              data.type === "run.cancelled"
+            ) {
+              reader.cancel().catch(() => {});
+              setConnectionState("connected");
+              if (data.type === "run.completed" || data.status === "completed") {
+                setPhase("succeeded");
+              } else if (data.type === "run.cancelled" || data.status === "cancelled") {
+                setPhase("cancelled");
+                setError((data.error as string) ?? "研究已取消");
+              } else {
+                setPhase("failed");
+                setError((data.error as string) ?? "研究执行失败");
+              }
+              return;
+            }
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (activeRunIdRef.current !== rId) return;
+
+        // Attempt reconnection
+        if (reconnectAttemptsRef.current < 5) {
+          scheduleReconnect(rId);
+        } else {
+          setConnectionState("disconnected");
+          // Keep runState — don't clear it
+        }
       }
-    };
+    })();
   }, [taskId, scheduleReconnect]);
   // Keep ref in sync to break circular dependency with scheduleReconnect
   connectSSERef.current = connectSSE;
@@ -560,16 +595,16 @@ export default function AutoResearchPage() {
   // ── Start a run stream: fetch initial state first, then connect SSE ──
   const startRunStream = useCallback(async (runId: string) => {
     activeRunIdRef.current = runId;
-    // Clear dedup set for new run
-    seenEventKeysRef.current.clear();
-    // Reset reconnection attempts for a fresh start
+    // Reset sequence for fresh run start
+    lastEventSequenceRef.current = -1;
+    lastSyncedAtRef.current = "";
     reconnectAttemptsRef.current = 0;
     try {
       const initialState = await api.getRun(runId);
       if (activeRunIdRef.current !== runId) return;
       setRunState(initialState);
     } catch {
-      // If initial fetch fails, SSE events will build state from scratch
+      if (activeRunIdRef.current !== runId) return;
       setRunState(null);
     }
     if (activeRunIdRef.current !== runId) return;
@@ -636,16 +671,16 @@ export default function AutoResearchPage() {
   // ── Connect dialog-planning SSE ──
   const connectDialogSSE = useCallback((planId: string) => {
     activePlanIdRef.current = planId;
-    eventSourceRef.current?.close();
+    dialogEventSourceRef.current?.close();
 
     const sseUrl = getApiUrl(`/research/dialog/${planId}/stream`);
     const es = new EventSource(sseUrl);
-    eventSourceRef.current = es;
+    dialogEventSourceRef.current = es;
 
     es.onmessage = (event) => {
       try {
         // Stale connection guard
-        if (activePlanIdRef.current !== planId || eventSourceRef.current !== es) return;
+        if (activePlanIdRef.current !== planId || dialogEventSourceRef.current !== es) return;
         const data = JSON.parse(event.data);
         if (data.type === "event") {
           const label = DIALOG_PHASE_LABELS[data.phase] ?? data.phase;
@@ -653,7 +688,7 @@ export default function AutoResearchPage() {
           setPlanningEvents((prev) => [...prev, `${label}${detail}`]);
         } else if (data.type === "done") {
           es.close();
-          eventSourceRef.current = null;
+          dialogEventSourceRef.current = null;
           activePlanIdRef.current = null;
 
           if (data.status === "failed") {
@@ -688,7 +723,7 @@ export default function AutoResearchPage() {
 
     es.onerror = () => {
       es.close();
-      eventSourceRef.current = null;
+      dialogEventSourceRef.current = null;
       if (activePlanIdRef.current !== planId) return;
 
       // Retry polling — dialog might have finished while SSE dropped
@@ -804,8 +839,10 @@ export default function AutoResearchPage() {
 
   // ── Reset ──
   const reset = useCallback(() => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    dialogEventSourceRef.current?.close();
+    dialogEventSourceRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -813,7 +850,8 @@ export default function AutoResearchPage() {
     reconnectAttemptsRef.current = 0;
     activeRunIdRef.current = null;
     activePlanIdRef.current = null;
-    seenEventKeysRef.current.clear();
+    lastEventSequenceRef.current = -1;
+    lastSyncedAtRef.current = "";
     if (runId && phase === "running") {
       void api.cancelRun(runId);
     }
@@ -1126,12 +1164,16 @@ export default function AutoResearchPage() {
         />
       )}
 
-      {/* Disconnected — manual recovery */}
+      {/* Disconnected — manual recovery, preserve snapshot */}
       {connectionState === "disconnected" && phase === "running" && (
         <Alert
           type="warning"
           message="实时连接已断开"
-          description="研究任务可能仍在后台运行中。"
+          description={
+            lastSyncedAtRef.current
+              ? `研究任务可能仍在后台运行中（最后同步: ${new Date(lastSyncedAtRef.current).toLocaleTimeString()}）。`
+              : "研究任务可能仍在后台运行中。"
+          }
           showIcon
           style={{ marginBottom: 16 }}
           role="status"

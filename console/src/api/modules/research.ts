@@ -33,6 +33,7 @@ export interface ResearchRunEvent {
   timestamp: string;
   round: number | null;
   detail: string;
+  sequence: number;
 }
 
 export interface ResearchRunOutcome {
