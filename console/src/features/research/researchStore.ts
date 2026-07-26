@@ -27,6 +27,10 @@ interface ResearchStore {
   errors: Record<string, string | null>;
   openPlan: (planId: string, goal: string) => void;
   updatePlan: (plan: ResearchDialogState) => void;
+  refreshPlan: (planId: string) => Promise<ResearchDialogState>;
+  savePlan: (planId: string, planMarkdown: string) => Promise<void>;
+  approvePlan: (planId: string) => Promise<void>;
+  rejectPlan: (planId: string, reason: string) => Promise<void>;
   openRun: (runId: string) => Promise<void>;
   closePanel: () => void;
   refreshSnapshot: (runId: string) => Promise<ResearchRunState>;
@@ -36,6 +40,29 @@ interface ResearchStore {
 const controllers = new Map<string, AbortController>();
 const reconnectAttempts = new Map<string, number>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const planControllers = new Map<string, AbortController>();
+
+async function watchPlan(planId: string): Promise<void> {
+  planControllers.get(planId)?.abort();
+  const controller = new AbortController();
+  planControllers.set(planId, controller);
+  try {
+    for (let attempt = 0; attempt < 3600; attempt += 1) {
+      if (controller.signal.aborted) return;
+      const plan = await useResearchStore.getState().refreshPlan(planId);
+      if (
+        ["completed", "failed", "cancelled", "rejected"].includes(plan.status)
+      ) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  } finally {
+    if (planControllers.get(planId) === controller) {
+      planControllers.delete(planId);
+    }
+  }
+}
 
 function latestSequence(snapshot: ResearchRunState): number {
   return snapshot.events.reduce(
@@ -91,7 +118,9 @@ export function reduceResearchMessage(
   }
 
   const terminal = String(message.type ?? "").replace("run.", "");
-  if (["completed", "failed", "cancelled", "auth_required"].includes(terminal)) {
+  if (
+    ["completed", "failed", "cancelled", "auth_required"].includes(terminal)
+  ) {
     return {
       ...snapshot,
       status: terminal,
@@ -135,7 +164,8 @@ async function connectRun(runId: string): Promise<void> {
         const current = useResearchStore.getState().snapshots[runId];
         if (!current) return;
         const next = reduceResearchMessage(current, message);
-        terminal = next.status !== current.status &&
+        terminal =
+          next.status !== current.status &&
           ["completed", "failed", "cancelled", "auth_required"].includes(
             next.status,
           );
@@ -160,9 +190,7 @@ async function connectRun(runId: string): Promise<void> {
       },
       errors: {
         ...state.errors,
-        [runId]: denied
-          ? `实时连接被拒绝 (${error.status})`
-          : "实时连接已断开",
+        [runId]: denied ? `实时连接被拒绝 (${error.status})` : "实时连接已断开",
       },
     }));
   } finally {
@@ -187,10 +215,13 @@ async function connectRun(runId: string): Promise<void> {
   }));
   reconnectTimers.set(
     runId,
-    setTimeout(() => {
-      reconnectTimers.delete(runId);
-      void connectRun(runId);
-    }, Math.min(1000 * 2 ** attempt, 15_000)),
+    setTimeout(
+      () => {
+        reconnectTimers.delete(runId);
+        void connectRun(runId);
+      },
+      Math.min(1000 * 2 ** attempt, 15_000),
+    ),
   );
 }
 
@@ -221,6 +252,24 @@ export const useResearchStore = create<ResearchStore>()(
               task_title: null,
               run_id: null,
               brief: null,
+              plan_markdown: null,
+              rounds: 3,
+              model: null,
+              auto_pr: true,
+              revision: 0,
+              content_hash: "",
+              approved_revision: null,
+              approved_content_hash: "",
+              approved_by: null,
+              approved_at: null,
+              rejected_by: null,
+              rejected_at: null,
+              rejection_reason: "",
+              worktree_path: "",
+              branch: "",
+              commit_sha: "",
+              pr_url: "",
+              test_summary: "",
               error: "",
               events: [],
               created_at: now,
@@ -234,6 +283,63 @@ export const useResearchStore = create<ResearchStore>()(
         set((state) => ({
           plans: { ...state.plans, [plan.plan_id]: plan },
         })),
+
+      refreshPlan: async (planId) => {
+        const plan = await api.dialogStatus(planId);
+        set((state) => ({
+          plans: { ...state.plans, [planId]: plan },
+        }));
+        return plan;
+      },
+
+      savePlan: async (planId, planMarkdown) => {
+        const current = get().plans[planId];
+        if (!current || current.revision < 1) {
+          throw new Error("Research plan is not ready for editing");
+        }
+        const updated = await api.editDialogPlan(planId, {
+          plan_markdown: planMarkdown,
+          expected_revision: current.revision,
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: updated },
+        }));
+      },
+
+      approvePlan: async (planId) => {
+        const current = get().plans[planId];
+        if (!current || !current.content_hash || current.revision < 1) {
+          throw new Error("Research plan is not ready for approval");
+        }
+        const approved = await api.approveDialogPlan(planId, {
+          expected_revision: current.revision,
+          content_hash: current.content_hash,
+          idempotency_key: [
+            "research",
+            planId,
+            current.revision,
+            current.content_hash.slice(0, 12),
+          ].join("-"),
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: approved },
+        }));
+        void watchPlan(planId).catch(() => undefined);
+      },
+
+      rejectPlan: async (planId, reason) => {
+        const current = get().plans[planId];
+        if (!current || current.revision < 1) {
+          throw new Error("Research plan is not ready for rejection");
+        }
+        const rejected = await api.rejectDialogPlan(planId, {
+          expected_revision: current.revision,
+          reason,
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: rejected },
+        }));
+      },
 
       openRun: async (runId) => {
         const previous = get().activeRunId;
@@ -275,6 +381,8 @@ export const useResearchStore = create<ResearchStore>()(
 
 export function resetResearchStoreForTests(): void {
   for (const runId of controllers.keys()) clearConnection(runId);
+  for (const controller of planControllers.values()) controller.abort();
+  planControllers.clear();
   reconnectAttempts.clear();
   useResearchStore.setState({
     activeRunId: null,

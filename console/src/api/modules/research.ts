@@ -90,6 +90,23 @@ export interface ResearchDialogState {
   run_id: string | null;
   brief: ResearchRunState["research_brief"];
   plan_markdown?: string | null;
+  rounds: number;
+  model: string | null;
+  auto_pr: boolean;
+  revision: number;
+  content_hash: string;
+  approved_revision: number | null;
+  approved_content_hash: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  rejection_reason: string;
+  worktree_path: string;
+  branch: string;
+  commit_sha: string;
+  pr_url: string;
+  test_summary: string;
   error: string;
   events: Array<{ phase: string; detail: string; timestamp: string }>;
   created_at: string;
@@ -100,8 +117,7 @@ export interface ResearchDialogState {
 
 export const researchApi = {
   /** List all available research tasks */
-  listTasks: () =>
-    request<ResearchTaskSummary[]>("/research/tasks"),
+  listTasks: () => request<ResearchTaskSummary[]>("/research/tasks"),
 
   /** Get full task details including program, current solution, baseline eval */
   getTask: (taskId: string) =>
@@ -128,8 +144,7 @@ export const researchApi = {
     }),
 
   /** SSE stream URL for a run (returns the URL string, not fetched) */
-  streamUrl: (runId: string) =>
-    `/api/research/runs/${runId}/stream`,
+  streamUrl: (runId: string) => `/api/research/runs/${runId}/stream`,
 
   /** Dialog-based research: submit goal → get plan_id (async, returns 202 immediately) */
   dialogResearch: (body: {
@@ -137,6 +152,8 @@ export const researchApi = {
     model?: string;
     rounds?: number;
     auto_pr?: boolean;
+    session_id?: string;
+    user_id?: string;
   }) =>
     request<{
       plan_id: string;
@@ -151,7 +168,37 @@ export const researchApi = {
   dialogStatus: (planId: string) =>
     request<ResearchDialogState>(`/research/dialog/${planId}`),
 
+  editDialogPlan: (
+    planId: string,
+    body: { plan_markdown: string; expected_revision: number },
+  ) =>
+    request<ResearchDialogState>(`/research/dialog/${planId}/plan`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  approveDialogPlan: (
+    planId: string,
+    body: {
+      expected_revision: number;
+      content_hash: string;
+      idempotency_key: string;
+    },
+  ) =>
+    request<ResearchDialogState>(`/research/dialog/${planId}/approve`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  rejectDialogPlan: (
+    planId: string,
+    body: { expected_revision: number; reason: string },
+  ) =>
+    request<ResearchDialogState>(`/research/dialog/${planId}/reject`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   /** SSE stream URL for dialog planning */
-  dialogStreamUrl: (planId: string) =>
-    `/api/research/dialog/${planId}/stream`,
+  dialogStreamUrl: (planId: string) => `/api/research/dialog/${planId}/stream`,
 };

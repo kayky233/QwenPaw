@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -122,6 +123,11 @@ Add a bounded retry around browser startup and cover the race with a test.
         patch.object(research_mod, "_run_single_phase", run_phase),
         patch.object(
             research_mod,
+            "_fetch_github_issue_evidence",
+            AsyncMock(return_value="#6470: MCP transport bug"),
+        ),
+        patch.object(
+            research_mod,
             "_owner_identity",
             return_value=("default", None, None),
         ),
@@ -143,6 +149,260 @@ Add a bounded retry around browser startup and cover the race with a test.
     assert state.status == "awaiting_approval"
     assert "Retry CDP bind conflicts" in state.plan_markdown
     assert state.run_id is None
+
+
+@pytest.mark.asyncio
+async def test_dialog_plan_edit_requires_owner_and_current_revision() -> None:
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "plan-edit-owner"
+    original = "# Fix issue 6470\n\nRun the focused MCP transport tests."
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="awaiting_approval",
+        goal="Fix issue 6470",
+        events=[],
+        owner_agent_id="default",
+        owner_user_id="kai",
+        owner_session_id="chat-1",
+        plan_markdown=original,
+        revision=1,
+        content_hash=hashlib.sha256(original.encode()).hexdigest(),
+    )
+
+    with patch.object(
+        research_mod,
+        "_owner_identity",
+        return_value=("default", "other-user", "chat-1"),
+    ):
+        with pytest.raises(research_mod.HTTPException) as denied:
+            await research_mod.edit_dialog_plan(
+                plan_id,
+                research_mod.DialogPlanEditRequest(
+                    plan_markdown="# Unauthorized edit",
+                    expected_revision=1,
+                ),
+            )
+    assert denied.value.status_code == 404
+
+    with patch.object(
+        research_mod,
+        "_owner_identity",
+        return_value=("default", "kai", "chat-1"),
+    ):
+        with pytest.raises(research_mod.HTTPException) as stale:
+            await research_mod.edit_dialog_plan(
+                plan_id,
+                research_mod.DialogPlanEditRequest(
+                    plan_markdown="# Stale edit",
+                    expected_revision=2,
+                ),
+            )
+        assert stale.value.status_code == 409
+
+        updated = await research_mod.edit_dialog_plan(
+            plan_id,
+            research_mod.DialogPlanEditRequest(
+                plan_markdown="# Fix issue 6470\n\nAdd regression coverage.",
+                expected_revision=1,
+            ),
+        )
+
+    state = research_mod._dialog_runs.pop(plan_id)
+    assert updated["revision"] == 2
+    assert state.plan_markdown == "# Fix issue 6470\n\nAdd regression coverage."
+    assert state.content_hash == hashlib.sha256(
+        state.plan_markdown.encode(),
+    ).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_dialog_approval_binds_revision_hash_and_is_idempotent() -> None:
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "plan-approve-revision"
+    plan = "# Fix issue 6470\n\nImplement and test streamable_http."
+    digest = hashlib.sha256(plan.encode()).hexdigest()
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="awaiting_approval",
+        goal="Fix issue 6470",
+        events=[],
+        owner_agent_id="default",
+        owner_user_id="kai",
+        owner_session_id="chat-1",
+        plan_markdown=plan,
+        revision=3,
+        content_hash=digest,
+    )
+    execute = AsyncMock()
+
+    with (
+        patch.object(
+            research_mod,
+            "_owner_identity",
+            return_value=("default", "kai", "chat-1"),
+        ),
+        patch.object(research_mod, "_execute_approved_dialog", execute),
+    ):
+        with pytest.raises(research_mod.HTTPException) as stale:
+            await research_mod.approve_dialog_plan(
+                plan_id,
+                research_mod.DialogPlanApprovalRequest(
+                    expected_revision=2,
+                    content_hash=digest,
+                    idempotency_key="approval-6470",
+                ),
+            )
+        assert stale.value.status_code == 409
+
+        approved = await research_mod.approve_dialog_plan(
+            plan_id,
+            research_mod.DialogPlanApprovalRequest(
+                expected_revision=3,
+                content_hash=digest,
+                idempotency_key="approval-6470",
+            ),
+        )
+        duplicate = await research_mod.approve_dialog_plan(
+            plan_id,
+            research_mod.DialogPlanApprovalRequest(
+                expected_revision=3,
+                content_hash=digest,
+                idempotency_key="approval-6470",
+            ),
+        )
+        await research_mod._dialog_tasks[plan_id]
+
+    state = research_mod._dialog_runs.pop(plan_id)
+    research_mod._dialog_tasks.pop(plan_id, None)
+    assert approved["status"] == "approved"
+    assert duplicate["status"] == "approved"
+    assert execute.await_count == 1
+    assert state.approved_revision == 3
+    assert state.approved_content_hash == digest
+    assert state.approved_by == "kai"
+    assert state.approved_at
+
+
+@pytest.mark.asyncio
+async def test_approved_dialog_executes_in_worktree_then_commits_and_pushes(
+    tmp_path: Path,
+) -> None:
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "plan-execute-approved"
+    plan = """# Fix issue 6470
+
+Repository: https://github.com/agentscope-ai/QwenPaw
+Issue: #6470
+Implement streamable_http transport selection and add a regression test.
+"""
+    digest = hashlib.sha256(plan.encode()).hexdigest()
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="approved",
+        goal="Fix https://github.com/agentscope-ai/QwenPaw issue #6470",
+        events=[],
+        owner_agent_id="default",
+        owner_user_id="kai",
+        owner_session_id="chat-1",
+        plan_markdown=plan,
+        revision=2,
+        content_hash=digest,
+        approved_revision=2,
+        approved_content_hash=digest,
+        approved_by="kai",
+        approved_at="2026-07-26T00:00:00+00:00",
+    )
+    workspace = object()
+    app_services = object()
+    research_mod._dialog_runtime_context[plan_id] = {
+        "workspace": workspace,
+        "app_services": app_services,
+    }
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    prepare = AsyncMock(
+        return_value=(worktree, "autoresearch/issue-6470-planexec"),
+    )
+    run_task = AsyncMock(
+        return_value={
+            "status": "success",
+            "response": "Implemented the fix and focused tests pass.",
+            "response_length": 47,
+            "tool_count": 7,
+            "model_info": {"model_name": "test-model"},
+        },
+    )
+    validate_commit = AsyncMock(
+        return_value={
+            "commit_sha": "a" * 40,
+            "test_summary": "focused tests passed",
+        },
+    )
+    push = AsyncMock()
+
+    with (
+        patch.object(research_mod, "_prepare_research_worktree", prepare),
+        patch.object(research_mod, "_run_task", run_task),
+        patch.object(
+            research_mod,
+            "_validate_and_commit_worktree",
+            validate_commit,
+        ),
+        patch.object(research_mod, "_push_research_branch", push),
+        patch(
+            "qwenpaw.config.config.load_agent_config",
+            return_value=SimpleNamespace(active_model=None),
+        ),
+    ):
+        await research_mod._execute_approved_dialog(plan_id)
+
+    state = research_mod._dialog_runs.pop(plan_id)
+    research_mod._dialog_runtime_context.pop(plan_id, None)
+    assert state.status == "completed"
+    assert state.worktree_path == str(worktree)
+    assert state.branch == "autoresearch/issue-6470-planexec"
+    assert state.commit_sha == "a" * 40
+    assert state.test_summary == "focused tests passed"
+    prepare.assert_awaited_once()
+    run_task.assert_awaited_once()
+    assert run_task.await_args.kwargs["workspace"] is workspace
+    assert run_task.await_args.kwargs["app_services"] is app_services
+    assert run_task.await_args.kwargs["workspace_dir_override"] == str(worktree)
+    validate_commit.assert_awaited_once()
+    push.assert_awaited_once_with(
+        worktree,
+        "autoresearch/issue-6470-planexec",
+    )
+
+
+@pytest.mark.asyncio
+async def test_approved_dialog_refuses_changed_plan_hash() -> None:
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "plan-hash-changed"
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="approved",
+        goal="Fix issue",
+        events=[],
+        plan_markdown="# Changed after approval",
+        revision=2,
+        content_hash="b" * 64,
+        approved_revision=1,
+        approved_content_hash="a" * 64,
+    )
+    prepare = AsyncMock()
+
+    with patch.object(research_mod, "_prepare_research_worktree", prepare):
+        await research_mod._execute_approved_dialog(plan_id)
+
+    state = research_mod._dialog_runs.pop(plan_id)
+    prepare.assert_not_awaited()
+    assert state.status == "approved"
 
 
 # ═══════════════════════════════════════════════════════════

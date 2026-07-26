@@ -9,7 +9,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import click
 
@@ -93,6 +93,10 @@ async def _run_task(
     output_dir: str | None,
     skills_dir: str | None = None,
     require_tools: bool = False,
+    workspace: Any | None = None,
+    app_services: Any | None = None,
+    workspace_dir_override: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> dict:
     from types import SimpleNamespace
 
@@ -104,10 +108,19 @@ async def _run_task(
     agent_config.running.max_iters = max_iters
 
     base_workspace: Path | None = None
-    if agent_config.workspace_dir:
+    if workspace_dir_override:
+        base_workspace = Path(workspace_dir_override).expanduser().resolve()
+    elif agent_config.workspace_dir:
         base_workspace = Path(agent_config.workspace_dir).expanduser()
 
-    with _isolated_skills_workspace(skills_dir, base_workspace) as workspace:
+    with _isolated_skills_workspace(skills_dir, base_workspace) as effective_workspace:
+        payload_context: dict[str, Any] = dict(request_context)
+        if allowed_tools is not None:
+            payload_context["subagent_allowed_tools"] = list(allowed_tools)
+        if workspace_dir_override:
+            payload_context["qwenpaw.coding_project_dir"] = str(
+                effective_workspace,
+            )
         req = AgentRequest(
             input=[
                 {
@@ -118,6 +131,8 @@ async def _run_task(
             session_id=request_context.get("session_id", "headless-task"),
             user_id=request_context.get("user_id", "headless"),
             channel=request_context.get("channel", "console"),
+            model_slot_override=getattr(agent_config, "active_model", None),
+            request_context=payload_context,
         )
         ctx = SimpleNamespace(
             request=req,
@@ -125,72 +140,78 @@ async def _run_task(
             agent_id=request_context.get("agent_id", "default"),
             root_session_id=req.session_id,
             root_agent_id=request_context.get("agent_id", "default"),
-            workspace_dir=workspace,
-            workspace=None,
-            app_services=None,
+            workspace_dir=effective_workspace,
+            workspace=workspace,
+            app_services=app_services,
             agent_config=None,
             session_state=None,
         )
-        builder = AgentBuilder()
-        agent = await builder.build(ctx)
-        try:
-            tool_count = sum(
-                len(group.tools)
-                for group in agent.toolkit.tool_groups
-            )
-        except (AttributeError, TypeError):
-            tool_count = 0
+        from ..config.context import current_workspace_dir
 
-        t0 = time.monotonic()
-        if require_tools and tool_count == 0:
-            result = {
-                "status": "config_error",
-                "elapsed_seconds": 0.0,
-                "error": (
-                    "This task requires repository or web tools, but the "
-                    "agent was built with zero tools."
-                ),
-                "response": "",
-                "response_length": 0,
-                "instruction_length": len(instruction),
-            }
-        else:
+        workspace_token = current_workspace_dir.set(effective_workspace)
+        try:
+            builder = AgentBuilder(app_services)
+            agent = await builder.build(ctx)
             try:
-                response = await asyncio.wait_for(
-                    agent.reply(
-                        [Msg(name="user", role="user", content=[{"type": "text", "text": instruction}])],
-                    ),
-                    timeout=timeout,
+                tool_count = sum(
+                    len(group.tools)
+                    for group in agent.toolkit.tool_groups
                 )
-                elapsed = time.monotonic() - t0
-                response_text = response.get_text_content() if response else ""
+            except (AttributeError, TypeError):
+                tool_count = 0
+
+            t0 = time.monotonic()
+            if require_tools and tool_count == 0:
                 result = {
-                    "status": "success",
-                    "elapsed_seconds": round(elapsed, 2),
-                    "response": response_text,
-                    "response_length": len(response_text),
-                    "instruction_length": len(instruction),
-                }
-            except asyncio.TimeoutError:
-                elapsed = time.monotonic() - t0
-                result = {
-                    "status": "timeout",
-                    "elapsed_seconds": round(elapsed, 2),
-                    "timeout_seconds": timeout,
+                    "status": "config_error",
+                    "elapsed_seconds": 0.0,
+                    "error": (
+                        "This task requires repository or web tools, but the "
+                        "agent was built with zero tools."
+                    ),
                     "response": "",
                     "response_length": 0,
                     "instruction_length": len(instruction),
                 }
-            except Exception as exc:
-                elapsed = time.monotonic() - t0
-                result = {
-                    "status": "error",
-                    "elapsed_seconds": round(elapsed, 2),
-                    "error": str(exc),
-                    "response": "",
-                    "response_length": 0,
-                    "instruction_length": len(instruction),
-                }
+            else:
+                try:
+                    response = await asyncio.wait_for(
+                        agent.reply(
+                            [Msg(name="user", role="user", content=[{"type": "text", "text": instruction}])],
+                        ),
+                        timeout=timeout,
+                    )
+                    elapsed = time.monotonic() - t0
+                    response_text = response.get_text_content() if response else ""
+                    result = {
+                        "status": "success",
+                        "elapsed_seconds": round(elapsed, 2),
+                        "response": response_text,
+                        "response_length": len(response_text),
+                        "instruction_length": len(instruction),
+                    }
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - t0
+                    result = {
+                        "status": "timeout",
+                        "elapsed_seconds": round(elapsed, 2),
+                        "timeout_seconds": timeout,
+                        "response": "",
+                        "response_length": 0,
+                        "instruction_length": len(instruction),
+                    }
+                except Exception as exc:
+                    elapsed = time.monotonic() - t0
+                    result = {
+                        "status": "error",
+                        "elapsed_seconds": round(elapsed, 2),
+                        "error": str(exc),
+                        "response": "",
+                        "response_length": 0,
+                        "instruction_length": len(instruction),
+                    }
+        finally:
+            current_workspace_dir.reset(workspace_token)
 
     # ── Extract model metadata and token usage ──
     usage: dict = {}

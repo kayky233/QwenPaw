@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
 import re
+import shlex
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -65,6 +67,24 @@ class DialogGoalRequest(BaseModel):
     model: str | None = Field(default=None, max_length=300)
     rounds: int = Field(default=3, ge=1, le=100)
     auto_pr: bool = Field(default=True, description="Automatically create PR after research")
+    session_id: str | None = Field(default=None, min_length=1, max_length=300)
+    user_id: str | None = Field(default=None, min_length=1, max_length=300)
+
+
+class DialogPlanEditRequest(BaseModel):
+    plan_markdown: str = Field(min_length=1, max_length=100_000)
+    expected_revision: int = Field(ge=1)
+
+
+class DialogPlanApprovalRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    content_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class DialogPlanRejectRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    reason: str = Field(default="", max_length=2000)
 
 
 class ResearchDirection(BaseModel):
@@ -123,6 +143,27 @@ class DialogRunState:
     run_id: str | None = None
     brief: dict[str, Any] | None = None
     plan_markdown: str | None = None
+    owner_agent_id: str = "default"
+    owner_user_id: str | None = None
+    owner_session_id: str | None = None
+    rounds: int = 3
+    model: str | None = None
+    auto_pr: bool = True
+    revision: int = 0
+    content_hash: str = ""
+    approved_revision: int | None = None
+    approved_content_hash: str = ""
+    approval_idempotency_key: str = ""
+    approved_by: str | None = None
+    approved_at: str | None = None
+    rejected_by: str | None = None
+    rejected_at: str | None = None
+    rejection_reason: str = ""
+    worktree_path: str = ""
+    branch: str = ""
+    commit_sha: str = ""
+    pr_url: str = ""
+    test_summary: str = ""
     error: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -157,6 +198,7 @@ _runtime_tasks: dict[str, asyncio.Task[None]] = {}
 _run_auto_pr: dict[str, bool] = {}
 _dialog_runs: dict[str, DialogRunState] = {}
 _dialog_tasks: dict[str, asyncio.Task[None]] = {}
+_dialog_runtime_context: dict[str, dict[str, Any]] = {}
 _dialog_sse_queues: dict[str, set[asyncio.Queue[dict[str, Any] | None]]] = {}
 _ledger_repository: BaseResearchLedgerRepository | None = None
 _ledger_tails: dict[str, asyncio.Task[None]] = {}
@@ -169,6 +211,72 @@ def _owner_identity() -> tuple[str, str | None, str | None]:
         get_current_user_id(),
         get_current_session_id(),
     )
+
+
+def _request_owner_identity(
+    request: Request,
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    authenticated_user = getattr(request.state, "user", None)
+    if isinstance(authenticated_user, dict):
+        authenticated_user = (
+            authenticated_user.get("username")
+            or authenticated_user.get("id")
+            or authenticated_user.get("sub")
+        )
+    resolved_user = (
+        str(authenticated_user)
+        if authenticated_user
+        else user_id or get_current_user_id()
+    )
+    return (
+        get_current_agent_id(),
+        resolved_user,
+        session_id or get_current_session_id(),
+    )
+
+
+def _dialog_owner(
+    dialog: DialogRunState,
+) -> tuple[str, str | None, str | None]:
+    return (
+        dialog.owner_agent_id,
+        dialog.owner_user_id,
+        dialog.owner_session_id,
+    )
+
+
+def _owned_dialog(
+    plan_id: str,
+    request: Request | None = None,
+) -> DialogRunState:
+    dialog = _dialog_runs.get(plan_id)
+    if dialog is None:
+        raise HTTPException(status_code=404, detail="Unknown dialog plan")
+    current = (
+        _request_owner_identity(request)
+        if request is not None
+        else _owner_identity()
+    )
+    owner = _dialog_owner(dialog)
+    same_agent = owner[0] == current[0]
+    same_user = owner[1] == current[1]
+    if not same_agent or not same_user:
+        raise HTTPException(status_code=404, detail="Unknown dialog plan")
+    return dialog
+
+
+def _plan_content_hash(plan_markdown: str) -> str:
+    return hashlib.sha256(plan_markdown.encode("utf-8")).hexdigest()
+
+
+def _dialog_payload(dialog: DialogRunState) -> dict[str, Any]:
+    payload = asdict(dialog)
+    for key in ("owner_agent_id", "owner_user_id", "owner_session_id"):
+        payload.pop(key)
+    return payload
 
 
 def _run_owner(run: ResearchRunState) -> tuple[str, str | None, str | None]:
@@ -889,11 +997,74 @@ async def _try_create_pr(run_id: str, task_id: str) -> None:
 # ── Dialog-based research: plan → create → run → PR ───────────────────────
 
 
-def _build_discovery_prompt(goal: str, rounds: int) -> str:
+async def _fetch_github_issue_evidence(goal: str) -> str:
+    match = _GITHUB_REPOSITORY_RE.search(goal)
+    if match is None:
+        return ""
+    owner, repository = match.groups()
+    url = f"https://api.github.com/repos/{owner}/{repository}/issues"
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(
+            timeout=30,
+            follow_redirects=False,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "QwenPaw-AutoResearch",
+            },
+        ) as client:
+            response = await client.get(
+                url,
+                params={"state": "open", "per_page": 30, "sort": "updated"},
+            )
+            response.raise_for_status()
+            rows = response.json()
+    except Exception as exc:
+        _log.warning("GitHub issue discovery failed for %s: %s", url, exc)
+        return f"GitHub Issues API unavailable: {type(exc).__name__}: {exc}"
+
+    issues: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or "pull_request" in row:
+            continue
+        labels = ", ".join(
+            str(label.get("name", ""))
+            for label in row.get("labels", [])
+            if isinstance(label, dict)
+        )
+        assignee = row.get("assignee")
+        assigned = (
+            str(assignee.get("login", ""))
+            if isinstance(assignee, dict)
+            else "unassigned"
+        )
+        body = re.sub(r"\s+", " ", str(row.get("body") or "")).strip()[:1200]
+        issues.append(
+            "\n".join(
+                [
+                    f"#{row.get('number')}: {row.get('title', '')}",
+                    f"labels={labels or 'none'}; assignee={assigned}",
+                    f"url={row.get('html_url', '')}",
+                    f"body={body or '(empty)'}",
+                ],
+            ),
+        )
+    return "\n\n".join(issues[:20])
+
+
+def _build_discovery_prompt(
+    goal: str,
+    rounds: int,
+    issue_evidence: str = "",
+) -> str:
     return (
         "Research the codebase before proposing any code changes.\n"
         "Use repository search and relevant tests to identify the current "
         "behavior, likely root causes, and ranked solution directions.\n"
+        "For GitHub issue work, rank only the real open issues in the supplied "
+        "GitHub evidence. Prefer an unassigned, narrowly scoped, testable issue "
+        "and include its issue number in every candidate title.\n"
         "Do not generate implementation code.\n\n"
         "Return only one JSON object with this exact shape:\n"
         "{\n"
@@ -908,7 +1079,8 @@ def _build_discovery_prompt(goal: str, rounds: int) -> str:
         f'  "iteration_budget": {rounds},\n'
         '  "modifiable_files": ["path"],\n'
         '  "relevant_tests": ["path"]\n'
-        "}\n"
+        "}\n\n"
+        f"GitHub issue evidence:\n{issue_evidence or '(not applicable)'}\n"
     )
 
 
@@ -942,6 +1114,7 @@ def _build_planning_prompt(goal: str) -> str:
 def _build_plan_only_prompt(
     goal: str,
     brief: ResearchBrief | None = None,
+    issue_evidence: str = "",
 ) -> str:
     """Phase 1: Generate program.md — research codebase, describe problem."""
     return (
@@ -950,8 +1123,8 @@ def _build_plan_only_prompt(
         "\n"
         "Steps:\n"
         "1. Analyze the goal to understand the problem.\n"
-        "2. If the goal mentions GitHub issues, use `gh issue list` / `gh issue view`.\n"
-        "3. Search the codebase with `find`, `grep`, or `rg` for the relevant source files.\n"
+        "2. If the goal mentions GitHub issues, use the supplied GitHub evidence.\n"
+        "3. Search the codebase with read_file, grep_search, or glob_search.\n"
         "4. Read the target source file(s) to understand current behavior.\n"
         "5. Write a detailed program.md with problem description, acceptance criteria,\n"
         "   relevant file paths, code snippets, and suggested test cases.\n"
@@ -963,6 +1136,9 @@ def _build_plan_only_prompt(
         "TASK_ID: <kebab-case-id>\n"
         "<<<FILE:program.md>>>\n"
         "# Problem Title\n"
+        "\n"
+        "Repository: https://github.com/<owner>/<repo>\n"
+        "Issue: #<number>\n"
         "\n"
         "## Goal\n"
         "Description of what needs to be fixed/improved\n"
@@ -994,7 +1170,8 @@ def _build_plan_only_prompt(
         "⚠️  Do NOT output judge.py or solution.py — only program.md.\n"
         "\n"
         f"User goal: {goal}\n"
-        f"Discovery brief:\n{brief.model_dump_json(indent=2) if brief else '{}'}"
+        f"Discovery brief:\n{brief.model_dump_json(indent=2) if brief else '{}'}\n"
+        f"GitHub issue evidence:\n{issue_evidence or '(not applicable)'}"
     )
 
 
@@ -1377,6 +1554,7 @@ async def _run_single_phase(
     from ...config.config import load_agent_config
 
     ds = _dialog_runs.get(plan_id)
+    runtime_context = _dialog_runtime_context.get(plan_id, {})
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         result = await _run_task(
             instruction=instruction,
@@ -1389,6 +1567,15 @@ async def _run_single_phase(
             timeout=timeout,
             output_dir=None,
             require_tools=require_tools,
+            workspace=runtime_context.get("workspace"),
+            app_services=runtime_context.get("app_services"),
+            allowed_tools=[
+                "read_file",
+                "grep_search",
+                "glob_search",
+                "web_search",
+                "web_fetch",
+            ],
         )
 
         if result["status"] != "success":
@@ -1599,7 +1786,7 @@ async def _execute_dialog_plan(
         return
 
     try:
-        owner_agent_id, owner_user_id, owner_session_id = _owner_identity()
+        owner_agent_id, owner_user_id, owner_session_id = _dialog_owner(ds)
 
         # ── Phase 1: Planning ──
         ds.status = "planning"
@@ -1626,9 +1813,23 @@ async def _execute_dialog_plan(
         # ── Discovery: decide what to optimize before planning code ──
         ds.status = "discovering"
         _dialog_emit(plan_id, "discovering", "调研当前实现、根因和候选方向...")
+        issue_evidence = await _fetch_github_issue_evidence(body.goal)
+        if issue_evidence:
+            issue_count = issue_evidence.count("\n#") + int(
+                issue_evidence.startswith("#"),
+            )
+            _dialog_emit(
+                plan_id,
+                "issues_loaded",
+                f"已读取 {issue_count} 个开放 GitHub Issues",
+            )
         brief_response = await _run_single_phase(
             plan_id=plan_id,
-            instruction=_build_discovery_prompt(body.goal, body.rounds),
+            instruction=_build_discovery_prompt(
+                body.goal,
+                body.rounds,
+                issue_evidence,
+            ),
             agent_config=agent_config,
             request_context=_plan_ctx("discovery"),
             max_iters=20,
@@ -1649,7 +1850,11 @@ async def _execute_dialog_plan(
             repaired = await _run_single_phase(
                 plan_id=plan_id,
                 instruction=(
-                    _build_discovery_prompt(body.goal, body.rounds)
+                    _build_discovery_prompt(
+                        body.goal,
+                        body.rounds,
+                        issue_evidence,
+                    )
                     + "\nThe previous response failed validation:\n"
                     + str(exc)
                 ),
@@ -1692,7 +1897,11 @@ async def _execute_dialog_plan(
         _dialog_emit(plan_id, "searching", "搜索代码库和 GitHub Issues...")
         program_md = await _run_single_phase(
             plan_id=plan_id,
-            instruction=_build_plan_only_prompt(body.goal, brief),
+            instruction=_build_plan_only_prompt(
+                body.goal,
+                brief,
+                issue_evidence,
+            ),
             agent_config=agent_config,
             request_context=_plan_ctx("plan"),
             max_iters=25,
@@ -1718,6 +1927,8 @@ async def _execute_dialog_plan(
         )
         ds.plan_markdown = _extract_phase_content(program_md, "program.md")
         ds.task_title = _task_title(ds.plan_markdown, ds.task_id)
+        ds.revision = 1
+        ds.content_hash = _plan_content_hash(ds.plan_markdown)
         ds.status = "awaiting_approval"
         _dialog_emit(
             plan_id,
@@ -1738,8 +1949,343 @@ async def _execute_dialog_plan(
         _dialog_close(plan_id)
 
 
+_GITHUB_REPOSITORY_RE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?"
+    r"(?:[/\s?#]|$)",
+)
+_ISSUE_NUMBER_RE = re.compile(r"(?:issues?/|#)(\d{1,10})", re.IGNORECASE)
+_EXECUTION_TOOLS = [
+    "read_file",
+    "grep_search",
+    "glob_search",
+    "write_file",
+    "edit_file",
+    "append_file",
+    "execute_shell_command",
+]
+
+
+async def _run_process(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: float = 300,
+) -> str:
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(
+            f"{args[0]} timed out after {timeout:g} seconds",
+        ) from exc
+    output = (
+        stdout.decode("utf-8", errors="replace")
+        + stderr.decode("utf-8", errors="replace")
+    ).strip()
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"{' '.join(args[:3])} failed ({process.returncode}): "
+            f"{output[-2000:]}",
+        )
+    return output
+
+
+def _github_repository(dialog: DialogRunState) -> tuple[str, str, str]:
+    text = f"{dialog.goal}\n{dialog.plan_markdown or ''}"
+    match = _GITHUB_REPOSITORY_RE.search(text)
+    if match is None:
+        raise RuntimeError("Approved plan does not contain a GitHub repository URL")
+    owner, repository = match.groups()
+    return (
+        owner,
+        repository,
+        f"https://github.com/{owner}/{repository}.git",
+    )
+
+
+async def _prepare_research_worktree(
+    dialog: DialogRunState,
+) -> tuple[Path, str]:
+    owner, repository, clone_url = _github_repository(dialog)
+    package_root = Path(__file__).resolve().parents[4]
+    source_root: Path | None = None
+    if (package_root / ".git").exists():
+        remote_url = await _run_process(
+            ["git", "remote", "get-url", "origin"],
+            cwd=package_root,
+            timeout=30,
+        )
+        if remote_url.lower().rstrip("/").endswith(
+            f"/{repository.lower()}.git",
+        ) or remote_url.lower().rstrip("/").endswith(
+            f"/{repository.lower()}",
+        ):
+            source_root = package_root
+
+    if source_root is None:
+        runtime = _dialog_runtime_context.get(dialog.plan_id, {})
+        workspace = runtime.get("workspace")
+        workspace_dir = Path(
+            getattr(workspace, "workspace_dir", WORKING_DIR),
+        ).expanduser()
+        source_root = (
+            workspace_dir
+            / ".qwenpaw"
+            / "research-repositories"
+            / f"{owner}-{repository}"
+        )
+        if not (source_root / ".git").exists():
+            source_root.parent.mkdir(parents=True, exist_ok=True)
+            await _run_process(
+                ["git", "clone", clone_url, str(source_root)],
+                cwd=source_root.parent,
+                timeout=600,
+            )
+
+    await _run_process(
+        ["git", "fetch", "origin", "main"],
+        cwd=source_root,
+        timeout=600,
+    )
+    issue_match = _ISSUE_NUMBER_RE.search(
+        f"{dialog.plan_markdown or ''}\n{dialog.goal}",
+    )
+    issue = issue_match.group(1) if issue_match else "task"
+    suffix = re.sub(r"[^a-z0-9]+", "", dialog.plan_id.lower())[:8]
+    branch = f"autoresearch/issue-{issue}-{suffix}"
+    worktree = (
+        source_root
+        / ".qwenpaw"
+        / "worktrees"
+        / f"research-{suffix}"
+    )
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    await _run_process(
+        [
+            "git",
+            "worktree",
+            "add",
+            str(worktree),
+            "-b",
+            branch,
+            "origin/main",
+        ],
+        cwd=source_root,
+        timeout=120,
+    )
+    return worktree, branch
+
+
+def _execution_prompt(dialog: DialogRunState, worktree: Path) -> str:
+    return f"""You are executing an already approved repository plan.
+
+Approved revision: {dialog.approved_revision}
+Approved SHA-256: {dialog.approved_content_hash}
+Repository worktree: {worktree}
+
+APPROVED PLAN
+{dialog.plan_markdown}
+
+Requirements:
+1. Inspect the issue and current code before editing.
+2. Make the smallest correct change entirely inside the worktree.
+3. Add or update focused regression tests.
+4. Run the focused tests and fix failures.
+5. Do not commit, push, create a pull request, or edit files outside the worktree.
+6. Finish only after the changes and tests are present on disk.
+"""
+
+
+async def _validate_and_commit_worktree(
+    worktree: Path,
+    dialog: DialogRunState,
+) -> dict[str, str]:
+    await _run_process(["git", "diff", "--check"], cwd=worktree, timeout=60)
+    status = await _run_process(
+        ["git", "status", "--porcelain"],
+        cwd=worktree,
+        timeout=30,
+    )
+    if not status.strip():
+        raise RuntimeError("Agent completed without changing repository files")
+
+    changed_paths = [
+        line[3:].strip()
+        for line in status.splitlines()
+        if len(line) > 3
+    ]
+    python_tests = [
+        path
+        for path in changed_paths
+        if path.startswith("tests/") and path.endswith(".py")
+    ]
+    if not python_tests:
+        raise RuntimeError(
+            "Repository changes do not include a focused Python regression test",
+        )
+
+    package_root = Path(__file__).resolve().parents[4]
+    python = package_root / ".venv" / "bin" / "python"
+    test_args = (
+        [str(python), "-m", "pytest", *python_tests, "-q"]
+        if python.exists()
+        else ["python", "-m", "pytest", *python_tests, "-q"]
+    )
+    test_output = await _run_process(
+        test_args,
+        cwd=worktree,
+        timeout=900,
+    )
+    await _run_process(
+        ["git", "config", "user.name", "QwenPaw AutoResearch"],
+        cwd=worktree,
+        timeout=30,
+    )
+    await _run_process(
+        ["git", "config", "user.email", "autoresearch@qwenpaw.local"],
+        cwd=worktree,
+        timeout=30,
+    )
+    await _run_process(["git", "add", "-A"], cwd=worktree, timeout=30)
+    issue_match = _ISSUE_NUMBER_RE.search(
+        f"{dialog.plan_markdown or ''}\n{dialog.goal}",
+    )
+    issue = issue_match.group(1) if issue_match else "research task"
+    await _run_process(
+        ["git", "commit", "-m", f"fix: resolve issue #{issue}"],
+        cwd=worktree,
+        timeout=120,
+    )
+    commit_sha = await _run_process(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        timeout=30,
+    )
+    return {
+        "commit_sha": commit_sha.strip(),
+        "test_summary": test_output[-4000:],
+    }
+
+
+async def _push_research_branch(worktree: Path, branch: str) -> None:
+    await _run_process(
+        ["git", "push", "-u", "origin", branch],
+        cwd=worktree,
+        timeout=600,
+    )
+
+
+async def _execute_approved_dialog(plan_id: str) -> None:
+    """Execute an approved plan in an isolated worktree, then push it."""
+    dialog = _dialog_runs.get(plan_id)
+    if dialog is None:
+        return
+    if (
+        dialog.status != "approved"
+        or dialog.approved_revision != dialog.revision
+        or dialog.approved_content_hash != dialog.content_hash
+    ):
+        return
+
+    try:
+        executing = replace(
+            dialog,
+            status="executing",
+            error="",
+            updated_at=_utc_now(),
+        )
+        _dialog_runs[plan_id] = executing
+        _dialog_emit(plan_id, "preparing_worktree", "正在创建隔离 Git 工作树")
+        worktree, branch = await _prepare_research_worktree(executing)
+        executing = replace(
+            _dialog_runs[plan_id],
+            worktree_path=str(worktree),
+            branch=branch,
+            updated_at=_utc_now(),
+        )
+        _dialog_runs[plan_id] = executing
+        _dialog_emit(plan_id, "implementing", f"正在实现 {branch}")
+
+        runtime_context = _dialog_runtime_context.get(plan_id, {})
+        from ...config.config import load_agent_config
+
+        agent_config = load_agent_config(executing.owner_agent_id)
+        result = await _run_task(
+            instruction=_execution_prompt(executing, worktree),
+            agent_config=agent_config,
+            request_context={
+                "session_id": executing.owner_session_id
+                or f"research-execute-{plan_id[:8]}",
+                "user_id": executing.owner_user_id or "research",
+                "channel": "console",
+                "agent_id": executing.owner_agent_id,
+            },
+            max_iters=60,
+            timeout=1800,
+            output_dir=None,
+            require_tools=True,
+            workspace=runtime_context.get("workspace"),
+            app_services=runtime_context.get("app_services"),
+            workspace_dir_override=str(worktree),
+            allowed_tools=_EXECUTION_TOOLS,
+        )
+        if result.get("status") != "success":
+            raise RuntimeError(
+                result.get("error")
+                or f"Execution agent failed with status={result.get('status')}",
+            )
+
+        _dialog_emit(plan_id, "testing", "正在运行回归测试并校验变更")
+        commit = await _validate_and_commit_worktree(
+            worktree,
+            _dialog_runs[plan_id],
+        )
+        _dialog_emit(plan_id, "pushing", f"正在推送分支 {branch}")
+        await _push_research_branch(worktree, branch)
+        completed = replace(
+            _dialog_runs[plan_id],
+            status="completed",
+            commit_sha=commit["commit_sha"],
+            test_summary=commit["test_summary"],
+            updated_at=_utc_now(),
+        )
+        _dialog_runs[plan_id] = completed
+        _dialog_emit(
+            plan_id,
+            "completed",
+            f"修复已提交并推送：{completed.commit_sha[:12]}",
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        current = _dialog_runs.get(plan_id, dialog)
+        failed = replace(
+            current,
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            updated_at=_utc_now(),
+        )
+        _dialog_runs[plan_id] = failed
+        _dialog_emit(plan_id, "failed", failed.error)
+    finally:
+        _dialog_close(plan_id)
+
+
 @router.post("/dialog", status_code=202)
-async def dialog_research(body: DialogGoalRequest) -> dict[str, Any]:
+async def dialog_research(
+    body: DialogGoalRequest,
+    request: Request,
+) -> dict[str, Any]:
     """Async: accept goal → start background planning → return plan_id immediately.
 
     Client should connect to `/research/dialog/{plan_id}/stream` for live progress.
@@ -1757,15 +2303,36 @@ async def dialog_research(body: DialogGoalRequest) -> dict[str, Any]:
 
     plan_id = uuid.uuid4().hex
     now = _utc_now()
+    owner_agent_id, owner_user_id, owner_session_id = _request_owner_identity(
+        request,
+        session_id=body.session_id,
+        user_id=body.user_id,
+    )
     ds = DialogRunState(
         plan_id=plan_id,
         status="accepted",
         goal=body.goal,
         events=[],
+        owner_agent_id=owner_agent_id,
+        owner_user_id=owner_user_id,
+        owner_session_id=owner_session_id,
+        rounds=body.rounds,
+        model=body.model,
+        auto_pr=body.auto_pr,
         created_at=now,
         updated_at=now,
     )
     _dialog_runs[plan_id] = ds
+    manager = getattr(request.app.state, "multi_agent_manager", None)
+    workspace = (
+        await manager.get_agent(owner_agent_id)
+        if manager is not None
+        else None
+    )
+    _dialog_runtime_context[plan_id] = {
+        "workspace": workspace,
+        "app_services": getattr(request.app.state, "app_services", None),
+    }
     _dialog_tasks[plan_id] = asyncio.create_task(_execute_dialog_plan(plan_id, body))
 
     return {
@@ -1776,33 +2343,122 @@ async def dialog_research(body: DialogGoalRequest) -> dict[str, Any]:
 
 
 @router.get("/dialog/{plan_id}")
-async def get_dialog_status(plan_id: str) -> dict[str, Any]:
+async def get_dialog_status(
+    plan_id: str,
+    request: Request = None,
+) -> dict[str, Any]:
     """Poll current dialog planning status."""
-    ds = _dialog_runs.get(plan_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Unknown dialog plan")
-    return {
-        "plan_id": ds.plan_id,
-        "status": ds.status,
-        "goal": ds.goal,
-        "task_id": ds.task_id,
-        "task_title": ds.task_title,
-        "run_id": ds.run_id,
-        "brief": ds.brief,
-        "plan_markdown": ds.plan_markdown,
-        "error": ds.error,
-        "events": ds.events,
-        "created_at": ds.created_at,
-        "updated_at": ds.updated_at,
-    }
+    return _dialog_payload(_owned_dialog(plan_id, request))
+
+
+@router.put("/dialog/{plan_id}/plan")
+async def edit_dialog_plan(
+    plan_id: str,
+    body: DialogPlanEditRequest,
+    request: Request = None,
+) -> dict[str, Any]:
+    dialog = _owned_dialog(plan_id, request)
+    if dialog.status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail="Dialog plan is not editable")
+    if body.expected_revision != dialog.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Stale plan revision; current revision is {dialog.revision}",
+        )
+    now = _utc_now()
+    updated = replace(
+        dialog,
+        plan_markdown=body.plan_markdown,
+        task_title=_task_title(body.plan_markdown, dialog.task_id or "research"),
+        revision=dialog.revision + 1,
+        content_hash=_plan_content_hash(body.plan_markdown),
+        updated_at=now,
+    )
+    _dialog_runs[plan_id] = updated
+    _dialog_emit(
+        plan_id,
+        "plan_updated",
+        f"研究方案已更新到 revision {updated.revision}",
+    )
+    return _dialog_payload(_dialog_runs[plan_id])
+
+
+@router.post("/dialog/{plan_id}/approve")
+async def approve_dialog_plan(
+    plan_id: str,
+    body: DialogPlanApprovalRequest,
+    request: Request = None,
+) -> dict[str, Any]:
+    dialog = _owned_dialog(plan_id, request)
+    if (
+        dialog.status in {"approved", "executing", "completed"}
+        and dialog.approval_idempotency_key == body.idempotency_key
+    ):
+        return _dialog_payload(dialog)
+    if dialog.status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail="Dialog plan is not awaiting approval")
+    if body.expected_revision != dialog.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Stale plan revision; current revision is {dialog.revision}",
+        )
+    if body.content_hash != dialog.content_hash:
+        raise HTTPException(status_code=409, detail="Plan content hash changed")
+
+    now = _utc_now()
+    approved_by = dialog.owner_user_id or dialog.owner_agent_id
+    approved = replace(
+        dialog,
+        status="approved",
+        approved_revision=dialog.revision,
+        approved_content_hash=dialog.content_hash,
+        approval_idempotency_key=body.idempotency_key,
+        approved_by=approved_by,
+        approved_at=now,
+        updated_at=now,
+    )
+    _dialog_runs[plan_id] = approved
+    _dialog_emit(plan_id, "approved", f"研究方案已由 {approved_by} 批准")
+    task = asyncio.create_task(_execute_approved_dialog(plan_id))
+    _dialog_tasks[plan_id] = task
+    return _dialog_payload(_dialog_runs[plan_id])
+
+
+@router.post("/dialog/{plan_id}/reject")
+async def reject_dialog_plan(
+    plan_id: str,
+    body: DialogPlanRejectRequest,
+    request: Request = None,
+) -> dict[str, Any]:
+    dialog = _owned_dialog(plan_id, request)
+    if dialog.status == "rejected":
+        return _dialog_payload(dialog)
+    if dialog.status != "awaiting_approval":
+        raise HTTPException(status_code=409, detail="Dialog plan is not awaiting approval")
+    if body.expected_revision != dialog.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Stale plan revision; current revision is {dialog.revision}",
+        )
+    now = _utc_now()
+    rejected = replace(
+        dialog,
+        status="rejected",
+        rejected_by=dialog.owner_user_id or dialog.owner_agent_id,
+        rejected_at=now,
+        rejection_reason=body.reason,
+        updated_at=now,
+    )
+    _dialog_runs[plan_id] = rejected
+    _dialog_emit(plan_id, "rejected", body.reason or "研究方案已拒绝")
+    _dialog_close(plan_id)
+    return _dialog_payload(_dialog_runs[plan_id])
 
 
 @router.get("/dialog/{plan_id}/stream")
 async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
     """SSE endpoint for dialog planning progress."""
-    ds = _dialog_runs.get(plan_id)
-    if not ds:
-        raise HTTPException(status_code=404, detail="Unknown dialog plan")
+    ds = _owned_dialog(plan_id, request)
 
     q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
     if plan_id not in _dialog_sse_queues:
@@ -1818,7 +2474,12 @@ async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
                 yield f"data: {json.dumps({'type': 'event', 'phase': evt['phase'], 'detail': evt.get('detail', '')})}\n\n"
 
             # If already completed/failed, send final event and close
-            if ds.status in ("completed", "failed", "awaiting_approval"):
+            if ds.status in (
+                "completed",
+                "failed",
+                "awaiting_approval",
+                "rejected",
+            ):
                 final = {
                     "type": "done",
                     "status": ds.status,

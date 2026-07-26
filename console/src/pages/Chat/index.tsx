@@ -1379,12 +1379,8 @@ export default function ChatPage() {
   const prevChatLoadingRef = useRef<boolean | string>(false);
   const { message } = useAppMessage();
   const researchPanelOpen = useResearchStore((state) => state.panelOpen);
-  const activeResearchRunId = useResearchStore(
-    (state) => state.activeRunId,
-  );
-  const activeResearchPlanId = useResearchStore(
-    (state) => state.activePlanId,
-  );
+  const activeResearchRunId = useResearchStore((state) => state.activeRunId);
+  const activeResearchPlanId = useResearchStore((state) => state.activePlanId);
   const { approvals, setApprovals } = useApprovalContext();
   const [approvalRequests, setApprovalRequests] = useState<
     Map<string, ApprovalMessageData>
@@ -1433,9 +1429,9 @@ export default function ChatPage() {
       if (command.action === "status") {
         if (!store.activeRunId) {
           const plan = store.activePlanId
-            ? await researchApi.dialogStatus(store.activePlanId).catch(
-                () => store.plans[store.activePlanId!],
-              )
+            ? await researchApi
+                .dialogStatus(store.activePlanId)
+                .catch(() => store.plans[store.activePlanId!])
             : undefined;
           if (plan) useResearchStore.getState().updatePlan(plan);
           message.info(
@@ -1448,7 +1444,9 @@ export default function ChatPage() {
         try {
           const snapshot = await store.refreshSnapshot(store.activeRunId);
           message.info(
-            `${snapshot.task_id} · ${snapshot.status} · ${snapshot.current_round ?? 0}/${snapshot.rounds}`,
+            `${snapshot.task_id} · ${snapshot.status} · ${
+              snapshot.current_round ?? 0
+            }/${snapshot.rounds}`,
           );
         } catch {
           message.error("读取研究状态失败");
@@ -1499,6 +1497,9 @@ export default function ChatPage() {
           goal: command.goal,
           rounds: 3,
           auto_pr: false,
+          session_id:
+            window.currentSessionId ||
+            (chatId ? sessionApi.getBackendSessionId(chatId) : undefined),
         });
         useResearchStore.getState().openPlan(plan.plan_id, command.goal);
         // Planning can legitimately take several model calls; keep the UI synced
@@ -1526,7 +1527,7 @@ export default function ChatPage() {
         message.error("启动 AutoResearch 失败");
       }
     },
-    [message],
+    [chatId, message],
   );
   const [chatSkills, setChatSkills] = useState<SkillSpec[]>([]);
   const consoleSkills = useMemo(
@@ -3336,10 +3337,7 @@ export default function ChatPage() {
       {/* End of main chat area */}
 
       {researchPanelOpen && (activeResearchRunId || activeResearchPlanId) && (
-        <ResearchSidePanel
-          mode="side-panel"
-          runId={activeResearchRunId}
-        />
+        <ResearchSidePanel mode="side-panel" runId={activeResearchRunId} />
       )}
 
       {/* Right-side history panel (full mode only) */}

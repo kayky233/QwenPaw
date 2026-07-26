@@ -1,11 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
+  CheckOutlined,
   CloseOutlined,
+  CloseCircleOutlined,
   ExperimentOutlined,
   ReloadOutlined,
+  SaveOutlined,
   StopOutlined,
 } from "@ant-design/icons";
-import { Button, Empty, Progress, Tag, Tooltip } from "antd";
+import { Button, Empty, Input, Progress, Tag, Tooltip } from "antd";
 
 import { useResearchStore } from "./researchStore";
 import styles from "./ResearchSidePanel.module.less";
@@ -23,10 +26,7 @@ const statusColor: Record<string, string> = {
   cancelled: "warning",
 };
 
-export function ResearchSidePanel({
-  mode,
-  runId,
-}: ResearchSidePanelProps) {
+export function ResearchSidePanel({ mode, runId }: ResearchSidePanelProps) {
   const activeRunId = useResearchStore((state) => state.activeRunId);
   const activePlanId = useResearchStore((state) => state.activePlanId);
   const plan = useResearchStore((state) =>
@@ -34,18 +34,22 @@ export function ResearchSidePanel({
   );
   const openRun = useResearchStore((state) => state.openRun);
   const closePanel = useResearchStore((state) => state.closePanel);
-  const refreshSnapshot = useResearchStore(
-    (state) => state.refreshSnapshot,
-  );
+  const refreshSnapshot = useResearchStore((state) => state.refreshSnapshot);
   const stopRun = useResearchStore((state) => state.stopRun);
+  const savePlan = useResearchStore((state) => state.savePlan);
+  const approvePlan = useResearchStore((state) => state.approvePlan);
+  const rejectPlan = useResearchStore((state) => state.rejectPlan);
+  const [planDraft, setPlanDraft] = useState("");
+  const [planAction, setPlanAction] = useState<
+    "save" | "approve" | "reject" | null
+  >(null);
+  const [planActionError, setPlanActionError] = useState("");
   const resolvedRunId = runId ?? activeRunId;
   const snapshot = useResearchStore((state) =>
     resolvedRunId ? state.snapshots[resolvedRunId] : undefined,
   );
   const connection = useResearchStore((state) =>
-    resolvedRunId
-      ? state.connectionStates[resolvedRunId] ?? "idle"
-      : "idle",
+    resolvedRunId ? state.connectionStates[resolvedRunId] ?? "idle" : "idle",
   );
   const error = useResearchStore((state) =>
     resolvedRunId ? state.errors[resolvedRunId] : null,
@@ -55,14 +59,75 @@ export function ResearchSidePanel({
     if (resolvedRunId && !snapshot) void openRun(resolvedRunId);
   }, [resolvedRunId, snapshot, openRun]);
 
+  useEffect(() => {
+    setPlanDraft(plan?.plan_markdown ?? "");
+    setPlanActionError("");
+  }, [plan?.plan_id, plan?.revision, plan?.plan_markdown]);
+
+  const handleSavePlan = async () => {
+    if (!plan) return;
+    setPlanAction("save");
+    setPlanActionError("");
+    try {
+      await savePlan(plan.plan_id, planDraft);
+    } catch (actionError) {
+      setPlanActionError(
+        actionError instanceof Error ? actionError.message : "保存方案失败",
+      );
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
+  const handleApprovePlan = async () => {
+    if (!plan) return;
+    setPlanAction("approve");
+    setPlanActionError("");
+    try {
+      if (planDraft !== (plan.plan_markdown ?? "")) {
+        await savePlan(plan.plan_id, planDraft);
+      }
+      await approvePlan(plan.plan_id);
+    } catch (actionError) {
+      setPlanActionError(
+        actionError instanceof Error ? actionError.message : "批准方案失败",
+      );
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
+  const handleRejectPlan = async () => {
+    if (!plan) return;
+    setPlanAction("reject");
+    setPlanActionError("");
+    try {
+      await rejectPlan(plan.plan_id, "用户拒绝当前研究方案");
+    } catch (actionError) {
+      setPlanActionError(
+        actionError instanceof Error ? actionError.message : "拒绝方案失败",
+      );
+    } finally {
+      setPlanAction(null);
+    }
+  };
+
   if ((!resolvedRunId || !snapshot) && plan) {
     const awaitingApproval = plan.status === "awaiting_approval";
-    const planProgress = awaitingApproval
-      ? 100
-      : Math.min(90, Math.max(8, plan.events.length * 12));
+    const planFinished = ["completed", "failed", "rejected"].includes(
+      plan.status,
+    );
+    const planProgress =
+      awaitingApproval || plan.status === "completed"
+        ? 100
+        : plan.status === "executing"
+        ? 88
+        : Math.min(82, Math.max(8, plan.events.length * 10));
     return (
       <aside
-        className={`${styles.panel} ${styles[mode === "side-panel" ? "side" : "full"]}`}
+        className={`${styles.panel} ${
+          styles[mode === "side-panel" ? "side" : "full"]
+        }`}
         aria-label="AutoResearch 规划面板"
       >
         <header className={styles.header}>
@@ -87,9 +152,13 @@ export function ResearchSidePanel({
               color={
                 plan.status === "failed"
                   ? "error"
+                  : plan.status === "completed"
+                  ? "success"
+                  : plan.status === "rejected"
+                  ? "default"
                   : awaitingApproval
-                    ? "gold"
-                    : "processing"
+                  ? "gold"
+                  : "processing"
               }
             >
               {plan.status}
@@ -97,6 +166,14 @@ export function ResearchSidePanel({
             <span>
               {awaitingApproval
                 ? "方案已生成，等待审批"
+                : plan.status === "approved"
+                ? "方案已批准，准备执行"
+                : plan.status === "executing"
+                ? "正在隔离工作树中实现并验证"
+                : plan.status === "completed"
+                ? "修复已完成并推送"
+                : plan.status === "rejected"
+                ? "方案已拒绝"
                 : "正在调研并生成研究计划"}
             </span>
           </div>
@@ -106,13 +183,15 @@ export function ResearchSidePanel({
             status={
               plan.status === "failed"
                 ? "exception"
-                : awaitingApproval
-                  ? "success"
-                  : "active"
+                : planFinished
+                ? "success"
+                : "active"
             }
           />
         </section>
-        {plan.error && <p className={styles.error}>{plan.error}</p>}
+        {(plan.error || planActionError) && (
+          <p className={styles.error}>{plan.error || planActionError}</p>
+        )}
         {plan.brief && (
           <section className={styles.brief}>
             <h3>已发现的优化方向</h3>
@@ -133,8 +212,41 @@ export function ResearchSidePanel({
         )}
         {plan.plan_markdown && (
           <section className={styles.plan}>
-            <h3>待审批方案</h3>
-            <pre>{plan.plan_markdown}</pre>
+            <div className={styles.sectionHeading}>
+              <h3>{awaitingApproval ? "待审批方案" : "已批准方案"}</h3>
+              <span>
+                revision {plan.revision} · {plan.content_hash.slice(0, 12)}
+              </span>
+            </div>
+            {awaitingApproval ? (
+              <Input.TextArea
+                aria-label="研究方案"
+                value={planDraft}
+                onChange={(event) => setPlanDraft(event.target.value)}
+                rows={16}
+                className={styles.planEditor}
+              />
+            ) : (
+              <pre>{plan.plan_markdown}</pre>
+            )}
+          </section>
+        )}
+        {(plan.branch || plan.commit_sha || plan.test_summary) && (
+          <section className={styles.artifacts}>
+            <h3>执行结果</h3>
+            {plan.branch && (
+              <div>
+                <span>分支</span>
+                <code>{plan.branch}</code>
+              </div>
+            )}
+            {plan.commit_sha && (
+              <div>
+                <span>Commit</span>
+                <code>{plan.commit_sha}</code>
+              </div>
+            )}
+            {plan.test_summary && <pre>{plan.test_summary}</pre>}
           </section>
         )}
         <section className={styles.rounds}>
@@ -153,6 +265,43 @@ export function ResearchSidePanel({
             ))
           )}
         </section>
+        {awaitingApproval && (
+          <footer className={styles.approvalFooter}>
+            <Button
+              icon={<SaveOutlined />}
+              aria-label="保存方案"
+              loading={planAction === "save"}
+              disabled={
+                Boolean(planAction) ||
+                !planDraft.trim() ||
+                planDraft === plan.plan_markdown
+              }
+              onClick={() => void handleSavePlan()}
+            >
+              保存
+            </Button>
+            <Button
+              type="primary"
+              icon={<CheckOutlined />}
+              aria-label="批准执行"
+              loading={planAction === "approve"}
+              disabled={Boolean(planAction) || !planDraft.trim()}
+              onClick={() => void handleApprovePlan()}
+            >
+              批准执行
+            </Button>
+            <Button
+              danger
+              icon={<CloseCircleOutlined />}
+              aria-label="拒绝方案"
+              loading={planAction === "reject"}
+              disabled={Boolean(planAction)}
+              onClick={() => void handleRejectPlan()}
+            >
+              拒绝
+            </Button>
+          </footer>
+        )}
       </aside>
     );
   }
@@ -160,7 +309,9 @@ export function ResearchSidePanel({
   if (!resolvedRunId || !snapshot) {
     return (
       <aside
-        className={`${styles.panel} ${styles[mode === "side-panel" ? "side" : "full"]}`}
+        className={`${styles.panel} ${
+          styles[mode === "side-panel" ? "side" : "full"]
+        }`}
       >
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -180,7 +331,9 @@ export function ResearchSidePanel({
 
   return (
     <aside
-      className={`${styles.panel} ${styles[mode === "side-panel" ? "side" : "full"]}`}
+      className={`${styles.panel} ${
+        styles[mode === "side-panel" ? "side" : "full"]
+      }`}
       aria-label="AutoResearch 运行面板"
     >
       <header className={styles.header}>
@@ -277,16 +430,19 @@ export function ResearchSidePanel({
                   outcome.status === "kept"
                     ? "success"
                     : outcome.status === "rejected"
-                      ? "default"
-                      : "error"
+                    ? "default"
+                    : "error"
                 }
               >
                 {outcome.status}
               </Tag>
-              <strong>
-                {outcome.candidate_score?.toFixed(1) ?? "—"}
-              </strong>
-              <small>{outcome.error || `${outcome.improvement >= 0 ? "+" : ""}${outcome.improvement.toFixed(1)}`}</small>
+              <strong>{outcome.candidate_score?.toFixed(1) ?? "—"}</strong>
+              <small>
+                {outcome.error ||
+                  `${
+                    outcome.improvement >= 0 ? "+" : ""
+                  }${outcome.improvement.toFixed(1)}`}
+              </small>
             </article>
           ))
         )}
