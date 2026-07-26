@@ -974,7 +974,7 @@ def _dialog_emit(plan_id: str, phase: str, detail: str = "") -> None:
 
 # ── P1: Split-phase planning helpers ───────────────────────────────────────
 
-_RETRY_LIMIT = 2  # per-phase retries
+_MAX_ATTEMPTS = 2  # per-phase max attempts (including first try)
 
 # Per-phase output size limits (characters). These prevent runaway token usage
 # while giving each phase enough room. program.md gets the most because it
@@ -1013,7 +1013,7 @@ async def _run_single_phase(
     from ...config.config import load_agent_config
 
     ds = _dialog_runs.get(plan_id)
-    for attempt in range(1, _RETRY_LIMIT + 1):
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
         result = await _run_task(
             instruction=instruction,
             agent_config=agent_config,
@@ -1029,15 +1029,15 @@ async def _run_single_phase(
         if result["status"] != "success":
             _log.warning(
                 "%s attempt %d/%d failed: %s",
-                phase_label, attempt, _RETRY_LIMIT,
+                phase_label, attempt, _MAX_ATTEMPTS,
                 result.get("error", result["status"]),
             )
-            if attempt < _RETRY_LIMIT:
+            if attempt < _MAX_ATTEMPTS:
                 continue
             # All retries exhausted
             if ds:
                 ds.status = "failed"
-                ds.error = f"{phase_label} 生成失败（{_RETRY_LIMIT} 次尝试均失败）"
+                ds.error = f"{phase_label} 生成失败（{_MAX_ATTEMPTS} 次尝试均失败）"
             _dialog_emit(plan_id, "failed", ds.error if ds else f"{phase_label} failed")
             _dialog_close(plan_id)
             return None
@@ -1060,10 +1060,10 @@ async def _run_single_phase(
                 "%s attempt %d: %d chars < min %d — retrying",
                 phase_label, attempt, response_len, min_chars,
             )
-            if attempt < _RETRY_LIMIT:
+            if attempt < _MAX_ATTEMPTS:
                 _dialog_emit(plan_id, "retrying",
                              f"{phase_label} 输出过短（{response_len} 字符 < {min_chars}），"
-                             f"重试 {attempt + 1}/{_RETRY_LIMIT}...")
+                             f"重试 {attempt + 1}/{_MAX_ATTEMPTS}...")
                 continue
             # All retries exhausted with short response
             if ds:
