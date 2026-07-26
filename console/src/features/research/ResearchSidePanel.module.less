@@ -1,0 +1,242 @@
+.panel {
+  --research-accent: #2f81f7;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  color: var(--text-color, #c9d1d9);
+  background:
+    linear-gradient(180deg, rgba(47, 129, 247, 0.08), transparent 180px),
+    var(--background-color, #0d1117);
+  border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.side {
+  width: clamp(340px, 30vw, 460px);
+  flex: 0 0 auto;
+  box-shadow: -18px 0 40px rgba(0, 0, 0, 0.12);
+}
+
+.full {
+  width: 100%;
+  min-height: 520px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+
+  h2 {
+    margin: 4px 0 0;
+    font-size: 17px;
+    font-weight: 650;
+  }
+}
+
+.eyebrow {
+  color: var(--research-accent);
+  font: 700 10px/1.2 "SF Mono", "JetBrains Mono", monospace;
+  letter-spacing: 0.16em;
+}
+
+.actions {
+  display: flex;
+}
+
+.overview,
+.brief,
+.plan,
+.rounds {
+  padding: 18px 20px;
+}
+
+.statusLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--text-secondary, #8b949e);
+  font-size: 12px;
+
+  i {
+    margin-left: auto;
+    font-style: normal;
+  }
+
+  i[data-state="connected"] {
+    color: #3fb950;
+  }
+
+  i[data-state="disconnected"] {
+    color: #f85149;
+  }
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 16px;
+
+  div {
+    padding: 12px 10px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.07));
+    border-radius: 8px;
+  }
+
+  strong,
+  span {
+    display: block;
+  }
+
+  strong {
+    font-size: 20px;
+    color: var(--text-color, #f0f6fc);
+  }
+
+  span {
+    margin-top: 4px;
+    color: var(--text-secondary, #8b949e);
+    font-size: 10px;
+  }
+}
+
+.brief,
+.plan,
+.rounds {
+  h3 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+}
+
+.plan {
+  min-height: 0;
+  overflow: auto;
+
+  pre {
+    margin: 0;
+    color: var(--text-color, #c9d1d9);
+    font: 12px/1.6 "SF Mono", "JetBrains Mono", monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.direction {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 9px;
+  align-items: start;
+  padding: 9px 0;
+
+  > span {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    color: var(--research-accent);
+    font: 700 10px/1 "SF Mono", "JetBrains Mono", monospace;
+    border: 1px solid rgba(47, 129, 247, 0.35);
+    border-radius: 50%;
+  }
+
+  strong,
+  small {
+    display: block;
+  }
+
+  strong {
+    font-size: 12px;
+  }
+
+  small {
+    margin-top: 3px;
+    color: var(--text-secondary, #8b949e);
+    line-height: 1.4;
+  }
+}
+
+.rounds {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.planningEvent {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+
+  span:last-child {
+    color: var(--text-secondary, #8b949e);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+}
+
+.round {
+  display: grid;
+  grid-template-columns: 34px 76px 44px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+
+  > span:first-child {
+    color: var(--research-accent);
+    font: 650 11px/1 "SF Mono", "JetBrains Mono", monospace;
+  }
+
+  strong {
+    text-align: right;
+  }
+
+  small {
+    overflow: hidden;
+    color: var(--text-secondary, #8b949e);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.muted,
+.error {
+  color: var(--text-secondary, #8b949e);
+  font-size: 12px;
+}
+
+.error {
+  margin: 0 20px;
+  padding: 10px 12px;
+  color: #ffb3ad;
+  background: rgba(248, 81, 73, 0.09);
+  border: 1px solid rgba(248, 81, 73, 0.2);
+  border-radius: 8px;
+}
+
+.footer {
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+@media (max-width: 900px) {
+  .side {
+    position: fixed;
+    z-index: 1100;
+    inset: 72px 0 0 auto;
+    width: min(92vw, 430px);
+  }
+}

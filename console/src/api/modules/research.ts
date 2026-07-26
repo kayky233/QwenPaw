@@ -63,6 +63,37 @@ export interface ResearchRunState {
   started_at: string | null;
   finished_at: string | null;
   error: string;
+  research_brief?: {
+    goal: string;
+    current_behavior: string;
+    root_cause_hypotheses: string[];
+    candidate_directions: Array<{
+      id: string;
+      title: string;
+      priority: number;
+      risk: string;
+      reason: string;
+    }>;
+    success_metrics: string[];
+    iteration_budget: number;
+    modifiable_files: string[];
+    relevant_tests: string[];
+  } | null;
+}
+
+export interface ResearchDialogState {
+  plan_id: string;
+  status: string;
+  goal: string;
+  task_id: string | null;
+  task_title: string | null;
+  run_id: string | null;
+  brief: ResearchRunState["research_brief"];
+  plan_markdown?: string | null;
+  error: string;
+  events: Array<{ phase: string; detail: string; timestamp: string }>;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── API ──
@@ -118,18 +149,7 @@ export const researchApi = {
 
   /** Poll dialog planning status */
   dialogStatus: (planId: string) =>
-    request<{
-      plan_id: string;
-      status: string;
-      goal: string;
-      task_id: string | null;
-      task_title: string | null;
-      run_id: string | null;
-      error: string;
-      events: Array<{ phase: string; detail: string; timestamp: string }>;
-      created_at: string;
-      updated_at: string;
-    }>(`/research/dialog/${planId}`),
+    request<ResearchDialogState>(`/research/dialog/${planId}`),
 
   /** SSE stream URL for dialog planning */
   dialogStreamUrl: (planId: string) =>

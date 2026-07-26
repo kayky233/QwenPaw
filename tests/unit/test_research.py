@@ -234,8 +234,25 @@ async def test_research_runs_evaluator_off_event_loop(
     assert all(thread_id != main_thread for thread_id in evaluator_threads)
 
 
-def test_tenth_line_judge_accepts_solution_and_rejects_wrong_one() -> None:
-    task = Path(__file__).parents[2] / "research" / "tenth-line"
+def test_shell_judge_accepts_solution_and_rejects_wrong_one(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "tenth-line"
+    task.mkdir()
+    (task / "program.md").write_text("Print the tenth line.", encoding="utf-8")
+    (task / "solution.sh").write_text("head -n 10 file.txt\n", encoding="utf-8")
+    (task / "judge.py").write_text(
+        """\
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+passed = "sed -n '10p'" in source
+print(json.dumps({"passed": passed, "score": 1 if passed else 0, "metrics": {"cases": 4}}))
+""",
+        encoding="utf-8",
+    )
 
     accepted = evaluate_candidate(task, "sed -n '10p' file.txt\n")
     rejected = evaluate_candidate(task, "head -n 10 file.txt\n")
@@ -360,6 +377,16 @@ def test_preflight_none_source_fails() -> None:
 
     valid, error = _preflight_candidate(None)  # type: ignore[arg-type]
     assert valid is False
+
+
+def test_preflight_non_python_skips_python_ast_validation() -> None:
+    """Shell/SQL/etc. candidates must not be parsed as Python."""
+    from qwenpaw.research import _preflight_candidate
+
+    valid, error = _preflight_candidate("printf 'ok'\n", ".sh")
+
+    assert valid is True
+    assert error == ""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1023,6 +1050,62 @@ async def test_cancelled_run_skips_remaining_stages(tmp_path: Path) -> None:
     # Result is cancelled
     assert len(result) == 1
     assert result[0].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_terminal_phase_error_stops_remaining_rounds(tmp_path: Path) -> None:
+    """A fatal phase error ends the run instead of restarting PLAN next round."""
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "program.md").write_text("Improve it.", encoding="utf-8")
+    (task_dir / "solution.py").write_text("value = 1\n", encoding="utf-8")
+    (task_dir / "judge.py").write_text(
+        'import json; print(json.dumps({"passed": True, "score": 1, "metrics": {}}))',
+        encoding="utf-8",
+    )
+    proposer_calls = 0
+
+    async def proposer(prompt: str) -> str:
+        nonlocal proposer_calls
+        proposer_calls += 1
+        if "not emit code" in prompt.lower():
+            return "Plan: make a small safe change"
+        return 'print(\u201chello\u201d)\n'
+
+    outcomes = await run_research(task_dir, proposer=proposer, rounds=3)
+
+    assert [outcome.status for outcome in outcomes] == ["phase_error"]
+    assert proposer_calls == 1 + 3
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_round_skips_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cancellation is checked before doing another expensive baseline run."""
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "program.md").write_text("Improve it.", encoding="utf-8")
+    (task_dir / "solution.py").write_text("value = 1\n", encoding="utf-8")
+    (task_dir / "judge.py").write_text("unused", encoding="utf-8")
+
+    def unexpected_evaluation(*_args, **_kwargs):
+        raise AssertionError("baseline must not run after cancellation")
+
+    monkeypatch.setattr("qwenpaw.research.evaluate_candidate", unexpected_evaluation)
+
+    async def proposer(_prompt: str) -> str:
+        raise AssertionError("proposer must not run after cancellation")
+
+    outcomes = await run_research(
+        task_dir,
+        proposer=proposer,
+        rounds=3,
+        is_cancelled=lambda: True,
+    )
+
+    assert [outcome.status for outcome in outcomes] == ["cancelled"]
 
 
 # ── P2: Atomic Write Tests ───────────────────────────────────────────────

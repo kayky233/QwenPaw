@@ -1,0 +1,56 @@
+.feed {
+  position: absolute;
+  z-index: 2;
+  top: 64px;
+  right: 20px;
+  left: 20px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 34px;
+  padding: 7px 12px;
+  overflow: hidden;
+  color: var(--text-secondary, #8b949e);
+  font-size: 11px;
+  background: color-mix(in srgb, var(--bg-color, #0d1117) 90%, transparent);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  backdrop-filter: blur(10px);
+
+  strong {
+    flex: none;
+    color: var(--text-color, #e6edf3);
+    font: 700 10px/1 "SF Mono", "JetBrains Mono", monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  span {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  i {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    background: #2f81f7;
+    border-radius: 50%;
+  }
+}
+
+@media (max-width: 768px) {
+  .feed {
+    right: 8px;
+    left: 8px;
+
+    span:not(:last-child) {
+      display: none;
+    }
+  }
+}

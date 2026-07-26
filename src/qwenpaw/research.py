@@ -49,6 +49,7 @@ _SANDBOX_FSIZE_MB = 10       # max file size judge can create (Unix only, best-e
 # Windows child limit: none — output may grow until disk full; residual risk accepted
 _MAX_READ_BYTES = 64 * 1024  # 64 KiB — max parent-side read per stdout/stderr
 _SUPPORTS_RLIMITS = os.name == "posix" and resource is not None
+FATAL_OUTCOME_STATUSES = frozenset({"cancelled", "phase_error", "proposer_error"})
 
 
 class _CancelledError(Exception):
@@ -232,14 +233,17 @@ _CONFUSABLE_UNICODE = {
 }
 
 
-def _preflight_candidate(source: str) -> tuple[bool, str]:
+def _preflight_candidate(
+    source: str,
+    solution_suffix: str = ".py",
+) -> tuple[bool, str]:
     """Validate candidate code before passing to the judge.
 
     Returns (is_valid, error_message). If is_valid is True, error_message
     is empty.  Detects:
 
-    1. Confusable Unicode that breaks Python syntax (smart quotes, etc.)
-    2. Python syntax errors via AST compilation
+    1. Confusable Unicode that commonly breaks generated source.
+    2. Python syntax errors via AST compilation for ``.py`` solutions.
     """
     if not source or not source.strip():
         return False, "candidate is empty"
@@ -254,11 +258,11 @@ def _preflight_candidate(source: str) -> tuple[bool, str]:
     if issues:
         return False, "confusable Unicode: " + "; ".join(issues[:5])
 
-    # ── AST compilation check ──
-    try:
-        ast.parse(source)
-    except SyntaxError as exc:
-        return False, f"SyntaxError at line {exc.lineno}, col {exc.offset}: {exc.msg}"
+    if solution_suffix.lower() == ".py":
+        try:
+            ast.parse(source)
+        except SyntaxError as exc:
+            return False, f"SyntaxError at line {exc.lineno}, col {exc.offset}: {exc.msg}"
 
     return True, ""
 
@@ -522,10 +526,14 @@ async def _phase_program(
     prompt = _build_program_prompt(task, source, outcomes, plan)
     response = await proposer(prompt)
     candidate = _extract_candidate(response)
+    latest_response = response
 
     # Preflight + repair loop
     for repair in range(_PROGRAM_MAX_ATTEMPTS):  # 0 = first try, 1+ = repairs
-        valid, preflight_error = _preflight_candidate(candidate)
+        valid, preflight_error = _preflight_candidate(
+            candidate,
+            task.solution.suffix,
+        )
         if valid:
             break
         if repair < _PROGRAM_MAX_ATTEMPTS - 1:
@@ -539,10 +547,12 @@ async def _phase_program(
                 _build_program_prompt(task, source, outcomes, plan)
                 + f"\n\n[SYSTEM] 上次生成的代码无法通过预检: {preflight_error}\n"
                 "请修复语法问题和异常 Unicode 字符后重新生成代码。\n"
-                "确保代码直接放入 ```python 代码块中，使用标准 ASCII 引号和缩进。"
+                f"确保代码直接放入 ```{task.solution.suffix.removeprefix('.')} "
+                "代码块中，使用标准 ASCII 引号和缩进。"
             )
             repair_response = await proposer(repair_prompt)
             candidate = _extract_candidate(repair_response)
+            latest_response = repair_response
         else:
             raise ValueError(
                 f"program phase exhausted: preflight failed after "
@@ -550,7 +560,7 @@ async def _phase_program(
             )
 
     # Send proposal summary event
-    proposal_preview = _proposal_summary(response, source, candidate)
+    proposal_preview = _proposal_summary(latest_response, source, candidate)
     if on_progress is not None:
         on_progress((round_number, "proposal", proposal_preview))
 
@@ -810,6 +820,24 @@ async def run_research(
 
     for round_number in range(1, rounds + 1):
         parent_source = source
+        if is_cancelled is not None and is_cancelled():
+            outcome = ResearchOutcome(
+                round_number,
+                "cancelled",
+                False,
+                0.0,
+                None,
+                0.0,
+                {},
+                "run cancelled",
+            )
+            if on_progress is not None:
+                on_progress((round_number, "run.cancelled", "运行已被取消"))
+            _record_run(task, outcome, parent_source, "")
+            outcomes.append(outcome)
+            if on_outcome is not None:
+                on_outcome(outcome)
+            break
 
         # ── Baseline evaluation ──
         if on_progress is not None:
@@ -925,6 +953,8 @@ async def run_research(
         outcomes.append(outcome)
         if on_outcome is not None:
             on_outcome(outcome)
+        if outcome.status in FATAL_OUTCOME_STATUSES:
+            break
 
     return tuple(outcomes)
 

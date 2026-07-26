@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -12,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 _log = logging.getLogger(__name__)
 
@@ -23,9 +24,8 @@ from pydantic import BaseModel, Field
 from ..agent_context import get_current_agent_id
 from ..agent_context import get_current_session_id
 from ..agent_context import get_current_user_id
-from ...cli.research_cmd import _run_with_qwenpaw
 from ...cli.task_cmd import _run_task
-from ...research import ResearchOutcome
+from ...research import FATAL_OUTCOME_STATUSES, ResearchOutcome
 from ...research import (
     evaluate_candidate,
     list_research_history,
@@ -33,7 +33,12 @@ from ...research import (
     create_research_task,
 )
 from ...research import UNSAFE_RESEARCH_OPT_IN, unsafe_research_enabled
-from ...research_submission import SubmissionResult, submit_solution
+from ...constant import WORKING_DIR
+from ...research_ledger.repository import (
+    BaseResearchLedgerRepository,
+    PostgresResearchLedgerRepository,
+)
+from ...research_runtime import run_with_qwenpaw as _run_with_qwenpaw
 
 
 router = APIRouter(prefix="/research", tags=["research"])
@@ -62,6 +67,25 @@ class DialogGoalRequest(BaseModel):
     auto_pr: bool = Field(default=True, description="Automatically create PR after research")
 
 
+class ResearchDirection(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=300)
+    priority: int = Field(ge=1, le=100)
+    risk: str = Field(min_length=1, max_length=50)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class ResearchBrief(BaseModel):
+    goal: str = Field(min_length=1, max_length=5000)
+    current_behavior: str = Field(min_length=1, max_length=10_000)
+    root_cause_hypotheses: list[str] = Field(min_length=1, max_length=20)
+    candidate_directions: list[ResearchDirection] = Field(min_length=1, max_length=20)
+    success_metrics: list[str] = Field(min_length=1, max_length=20)
+    iteration_budget: int = Field(ge=1, le=100)
+    modifiable_files: list[str] = Field(default_factory=list, max_length=100)
+    relevant_tests: list[str] = Field(default_factory=list, max_length=100)
+
+
 @dataclass(frozen=True)
 class ResearchRunEvent:
     phase: str
@@ -69,6 +93,16 @@ class ResearchRunEvent:
     round: int | None = None
     detail: str = ""
     sequence: int = 0  # monotonic, for dedup & after_sequence resumption
+
+
+@dataclass(frozen=True)
+class SubmissionResult:
+    """Published artifact metadata, currently used for optional PR creation."""
+
+    status: str
+    url: str = ""
+    verdict: str = ""
+    error: str = ""
 
 
 # ── Terminal run statuses — completed runs should immediately close SSE ──
@@ -79,14 +113,16 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset(
 
 @dataclass
 class DialogRunState:
-    """Mutable state for the dialog planning + creation pipeline."""
+    """Mutable state for the dialog discovery + approval pipeline."""
     plan_id: str
-    status: str  # "planning" | "creating_task" | "starting_run" | "completed" | "failed"
+    status: str
     goal: str
     events: list[dict[str, Any]]
     task_id: str | None = None
     task_title: str | None = None
     run_id: str | None = None
+    brief: dict[str, Any] | None = None
+    plan_markdown: str | None = None
     error: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -113,6 +149,7 @@ class ResearchRunState:
     finished_at: str | None = None
     error: str = ""
     submission: SubmissionResult | None = None
+    research_brief: dict[str, Any] | None = None
 
 
 _runs: dict[str, ResearchRunState] = {}
@@ -121,6 +158,9 @@ _run_auto_pr: dict[str, bool] = {}
 _dialog_runs: dict[str, DialogRunState] = {}
 _dialog_tasks: dict[str, asyncio.Task[None]] = {}
 _dialog_sse_queues: dict[str, set[asyncio.Queue[dict[str, Any] | None]]] = {}
+_ledger_repository: BaseResearchLedgerRepository | None = None
+_ledger_tails: dict[str, asyncio.Task[None]] = {}
+_ledger_errors: dict[str, Exception] = {}
 
 
 def _owner_identity() -> tuple[str, str | None, str | None]:
@@ -137,6 +177,211 @@ def _run_owner(run: ResearchRunState) -> tuple[str, str | None, str | None]:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _datetime_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _queue_ledger_write(
+    run_id: str,
+    operation: Callable[[BaseResearchLedgerRepository], Awaitable[Any]],
+) -> None:
+    repository = _ledger_repository
+    if repository is None:
+        return
+    previous = _ledger_tails.get(run_id)
+
+    async def ordered_write() -> None:
+        if previous is not None:
+            try:
+                await previous
+            except Exception:
+                pass
+        try:
+            await operation(repository)
+        except Exception as exc:
+            _ledger_errors[run_id] = exc
+            _log.exception("Research Ledger write failed for run %s", run_id)
+            raise
+
+    _ledger_tails[run_id] = asyncio.create_task(ordered_write())
+
+
+async def _flush_ledger(run_id: str) -> None:
+    tail = _ledger_tails.get(run_id)
+    if tail is not None:
+        try:
+            await tail
+        except Exception:
+            pass
+    error = _ledger_errors.pop(run_id, None)
+    if error is not None:
+        raise RuntimeError(f"Research Ledger write failed for {run_id}") from error
+
+
+async def _persist_new_run(state: ResearchRunState, task_root: Path) -> None:
+    repository = _ledger_repository
+    if repository is None:
+        return
+    if await repository.get_task(state.task_id) is None:
+        solution_path = next(task_root.glob("solution.*"))
+        await repository.create_task(
+            state.task_id,
+            (task_root / "program.md").read_text(encoding="utf-8"),
+            solution_path.name,
+            solution_path.read_text(encoding="utf-8"),
+            (task_root / "judge.py").read_text(encoding="utf-8"),
+        )
+    await repository.create_run(
+        state.id,
+        state.task_id,
+        state.agent_id,
+        state.rounds,
+        owner_agent_id=state.owner_agent_id,
+        owner_user_id=state.owner_user_id,
+        owner_session_id=state.owner_session_id,
+        research_brief=json.dumps(state.research_brief or {}),
+    )
+    await repository.update_run_status(
+        state.id,
+        state.status,
+        state.phase,
+        state.error,
+    )
+    for event in state.events:
+        await repository.record_event(
+            state.id,
+            event.phase,
+            event.round,
+            event.detail,
+            event.sequence,
+        )
+
+
+async def _restore_ledger_runs() -> None:
+    repository = _ledger_repository
+    if repository is None:
+        return
+    # ponytail: recent 500 is enough for UI history; paginate when history UI needs it.
+    for stored in await repository.list_recent_runs(limit=500):
+        events = await repository.list_events(stored.run_id)
+        outcomes = await repository.list_outcomes(stored.run_id)
+        run_events = tuple(
+            ResearchRunEvent(
+                event.phase,
+                _datetime_iso(event.timestamp) or _utc_now(),
+                event.round,
+                event.detail,
+                event.sequence,
+            )
+            for event in events
+        )
+        run_outcomes = tuple(
+            ResearchOutcome(
+                outcome.round,
+                outcome.status,
+                outcome.passed,
+                outcome.baseline_score,
+                outcome.candidate_score,
+                outcome.improvement,
+                json.loads(outcome.metrics or "{}"),
+                outcome.error,
+            )
+            for outcome in outcomes
+        )
+        status = stored.status
+        error = stored.error
+        finished_at = _datetime_iso(stored.finished_at)
+        if status in {"queued", "running"}:
+            status = "failed"
+            error = "Research run was interrupted by server restart"
+            finished_at = _utc_now()
+            sequence = run_events[-1].sequence + 1 if run_events else 0
+            interrupted = ResearchRunEvent(
+                "failed",
+                finished_at,
+                stored.current_round,
+                error,
+                sequence,
+            )
+            run_events = (*run_events, interrupted)
+            await repository.record_event(
+                stored.run_id,
+                interrupted.phase,
+                interrupted.round,
+                interrupted.detail,
+                interrupted.sequence,
+            )
+            await repository.finish_run(
+                stored.run_id,
+                status,
+                "failed",
+                error,
+            )
+        _runs[stored.run_id] = ResearchRunState(
+            id=stored.run_id,
+            task_id=stored.task_id,
+            agent_id=stored.agent_id,
+            owner_agent_id=stored.owner_agent_id,
+            owner_user_id=stored.owner_user_id,
+            owner_session_id=stored.owner_session_id,
+            status=status,
+            rounds=stored.rounds,
+            completed_rounds=len(run_outcomes),
+            outcomes=run_outcomes,
+            created_at=_datetime_iso(stored.created_at) or _utc_now(),
+            events=run_events,
+            current_round=stored.current_round,
+            phase="failed" if status == "failed" else stored.phase,
+            updated_at=_datetime_iso(stored.updated_at) or _utc_now(),
+            started_at=_datetime_iso(stored.started_at),
+            finished_at=finished_at,
+            error=error,
+            research_brief=json.loads(stored.research_brief or "{}"),
+        )
+
+
+async def initialize_research_ledger(database_url: str | None = None) -> None:
+    global _ledger_repository
+    if _ledger_repository is not None:
+        await close_research_ledger()
+    if database_url is None:
+        WORKING_DIR.mkdir(parents=True, exist_ok=True)
+        database_url = (
+            f"sqlite+aiosqlite:///{WORKING_DIR / 'research-ledger.db'}"
+        )
+    repository = PostgresResearchLedgerRepository(database_url)
+    await repository.initialize()
+    _ledger_repository = repository
+    try:
+        await _restore_ledger_runs()
+    except Exception:
+        await repository.close()
+        _ledger_repository = None
+        raise
+
+
+async def close_research_ledger() -> None:
+    global _ledger_repository
+    runtime_tasks = tuple(_runtime_tasks.values())
+    for task in runtime_tasks:
+        task.cancel()
+    if runtime_tasks:
+        await asyncio.gather(*runtime_tasks, return_exceptions=True)
+    _runtime_tasks.clear()
+    repository = _ledger_repository
+    if repository is None:
+        return
+    await asyncio.gather(*_ledger_tails.values(), return_exceptions=True)
+    _ledger_tails.clear()
+    _ledger_errors.clear()
+    await repository.close()
+    _ledger_repository = None
 
 
 def get_research_root() -> Path:
@@ -234,6 +479,29 @@ def _report_event(
         phase=phase,
         updated_at=now,
     )
+    persisted = _runs[run_id]
+
+    async def persist(repository: BaseResearchLedgerRepository) -> None:
+        await repository.record_event(
+            run_id,
+            event.phase,
+            event.round,
+            event.detail,
+            event.sequence,
+        )
+        await repository.update_run_status(
+            run_id,
+            persisted.status,
+            persisted.phase,
+            persisted.error,
+        )
+        await repository.update_run_progress(
+            run_id,
+            persisted.completed_rounds,
+            persisted.current_round,
+        )
+
+    _queue_ledger_write(run_id, persist)
 
 
 def _summary(task_id: str) -> dict[str, Any]:
@@ -283,7 +551,8 @@ async def get_task(task_id: str) -> dict[str, Any]:
             "score": None,
             "metrics": {},
             "error": (
-                "Evaluation disabled because it is not sandboxed; set "
+                "Evaluation disabled because best-effort isolation is not a "
+                "complete security boundary; set "
                 f"{UNSAFE_RESEARCH_OPT_IN} to opt in locally"
             ),
         }
@@ -304,7 +573,8 @@ async def create_task(body: CreateResearchTask) -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Research evaluator execution is not sandboxed; set "
+                "Research evaluator uses best-effort isolation rather than a "
+                "complete security boundary; set "
                 f"{UNSAFE_RESEARCH_OPT_IN} to opt in locally"
             ),
         )
@@ -334,6 +604,23 @@ def _report_outcome(run_id: str, outcome: ResearchOutcome) -> None:
         outcomes=outcomes,
         completed_rounds=len(outcomes),
     )
+
+    async def persist(repository: BaseResearchLedgerRepository) -> None:
+        await repository.record_outcome(
+            run_id,
+            outcome.round,
+            outcome.status,
+            outcome.passed,
+            outcome.baseline_score,
+            outcome.candidate_score,
+            outcome.improvement,
+            json.dumps(dict(outcome.metrics)),
+            outcome.error,
+            "",
+            "",
+        )
+
+    _queue_ledger_write(run_id, persist)
     _report_event(run_id, outcome.status, outcome.round, outcome.error)
 
 
@@ -374,6 +661,11 @@ def _finish_run(
     )
     # Record terminal event in the run's event log
     _report_event(run_id, status, detail=error)
+
+    async def persist(repository: BaseResearchLedgerRepository) -> None:
+        await repository.finish_run(run_id, status, status, error)
+
+    _queue_ledger_write(run_id, persist)
     # Send terminal SSE events for frontend consumption
     _sse_broadcast(
         run_id,
@@ -397,7 +689,7 @@ async def _execute_run(
     )
     _report_event(run_id, "starting")
     try:
-        await _run_with_qwenpaw(
+        outcomes = await _run_with_qwenpaw(
             task_dir,
             body.model,
             body.rounds,
@@ -409,37 +701,39 @@ async def _execute_run(
             current.agent_id,
             on_outcome=lambda outcome: _report_outcome(run_id, outcome),
             on_progress=lambda progress: _report_progress(run_id, progress),
+            is_cancelled=lambda: (
+                (state := _runs.get(run_id)) is None
+                or state.status == "cancelled"
+            ),
         )
-        from ...config.config import load_agent_config
+        fatal = next(
+            (
+                outcome
+                for outcome in outcomes
+                if outcome.status in FATAL_OUTCOME_STATUSES
+            ),
+            None,
+        )
+        if fatal is not None:
+            if fatal.status == "cancelled":
+                _finish_run(
+                    run_id,
+                    "cancelled",
+                    error=fatal.error or "Research run was cancelled",
+                )
+            else:
+                _finish_run(
+                    run_id,
+                    "failed",
+                    error=fatal.error or f"Research failed: {fatal.status}",
+                )
+            return
 
-        agent_config = load_agent_config(current.agent_id)
-        workspace_dir = (
-            Path(agent_config.workspace_dir).expanduser()
-            if agent_config.workspace_dir
-            else task_dir
-        )
-        submission = await submit_solution(
-            task_dir,
-            load_task(task_dir).solution,
-            workspace_dir,
-            page_id=f"research-{run_id[:8]}",
-            on_progress=lambda phase: _report_event(run_id, phase),
-        )
-        if submission is not None:
-            _runs[run_id] = replace(_runs[run_id], submission=submission)
-            if submission.status == "auth_required":
-                _finish_run(run_id, "auth_required", error="LeetCode authentication is required")
-                return
-            if submission.status != "accepted":
-                detail = submission.verdict or submission.error
-                _finish_run(run_id, "failed", error=detail or "Remote submission failed")
-                return
-            _report_event(run_id, "accepted", detail=submission.verdict)
-        _finish_run(run_id, "completed")
-        # Attempt PR creation after successful research
+        # Finalize optional PR before publishing the completed terminal event.
         run_state = _runs.get(run_id)
         if run_state is not None:
             await _try_create_pr(run_id, run_state.task_id)
+        _finish_run(run_id, "completed")
     except asyncio.CancelledError:
         if _runs[run_id].status != "cancelled":
             _finish_run(run_id, "cancelled", error="Research run was cancelled", allow_overwrite=True)
@@ -447,6 +741,10 @@ async def _execute_run(
         _finish_run(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
     finally:
         _runtime_tasks.pop(run_id, None)
+        try:
+            await _flush_ledger(run_id)
+        except RuntimeError:
+            _log.exception("Research Ledger flush failed for run %s", run_id)
 
 
 @router.post("/tasks/{task_id}/runs", status_code=202)
@@ -455,7 +753,8 @@ async def start_run(task_id: str, body: StartResearchRun) -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Research evaluator execution is not sandboxed; set "
+                "Research evaluator uses best-effort isolation rather than a "
+                "complete security boundary; set "
                 f"{UNSAFE_RESEARCH_OPT_IN} to opt in locally"
             ),
         )
@@ -466,6 +765,7 @@ async def start_run(task_id: str, body: StartResearchRun) -> dict[str, Any]:
             status_code=403,
             detail="Research runs must use the current agent",
         )
+    # ponytail: task solution is shared, so runs serialize globally per task.
     if _active_run(task_id) is not None:
         raise HTTPException(status_code=409, detail="This task is already running")
     run_id = uuid.uuid4().hex
@@ -489,6 +789,7 @@ async def start_run(task_id: str, body: StartResearchRun) -> dict[str, Any]:
         updated_at=created_at,
     )
     _runs[run_id] = state
+    await _persist_new_run(state, task.root)
     _runtime_tasks[run_id] = asyncio.create_task(_execute_run(run_id, task.root, body))
     return _run_payload(state)
 
@@ -507,10 +808,10 @@ async def cancel_run(run_id: str) -> dict[str, Any]:
     task = _runtime_tasks.pop(run_id, None)
     if task is not None:
         task.cancel()
-    return _run_payload(_runs[run_id])
-    task = _runtime_tasks.pop(run_id, None)
-    if task is not None:
-        task.cancel()
+    try:
+        await _flush_ledger(run_id)
+    except RuntimeError:
+        _log.exception("Research Ledger flush failed for run %s", run_id)
     return _run_payload(_runs[run_id])
 
 
@@ -588,16 +889,64 @@ async def _try_create_pr(run_id: str, task_id: str) -> None:
 # ── Dialog-based research: plan → create → run → PR ───────────────────────
 
 
+def _build_discovery_prompt(goal: str, rounds: int) -> str:
+    return (
+        "Research the codebase before proposing any code changes.\n"
+        "Use repository search and relevant tests to identify the current "
+        "behavior, likely root causes, and ranked solution directions.\n"
+        "Do not generate implementation code.\n\n"
+        "Return only one JSON object with this exact shape:\n"
+        "{\n"
+        f'  "goal": {json.dumps(goal)},\n'
+        '  "current_behavior": "...",\n'
+        '  "root_cause_hypotheses": ["..."],\n'
+        '  "candidate_directions": [\n'
+        '    {"id": "short-id", "title": "...", "priority": 1, '
+        '"risk": "low|medium|high", "reason": "..."}\n'
+        "  ],\n"
+        '  "success_metrics": ["..."],\n'
+        f'  "iteration_budget": {rounds},\n'
+        '  "modifiable_files": ["path"],\n'
+        '  "relevant_tests": ["path"]\n'
+        "}\n"
+    )
+
+
+def _parse_research_brief(
+    response: str,
+    *,
+    goal: str,
+    rounds: int,
+) -> ResearchBrief:
+    start = response.find("{")
+    end = response.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Discovery response does not contain a JSON object")
+    try:
+        payload = json.loads(response[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Discovery JSON is invalid: {exc}") from exc
+    payload["goal"] = goal
+    payload["iteration_budget"] = rounds
+    try:
+        return ResearchBrief.model_validate(payload)
+    except Exception as exc:
+        raise ValueError(f"ResearchBrief validation failed: {exc}") from exc
+
+
 def _build_planning_prompt(goal: str) -> str:
     """Original monolithic prompt — kept for backward compatibility."""
     return _build_plan_only_prompt(goal)
 
 
-def _build_plan_only_prompt(goal: str) -> str:
+def _build_plan_only_prompt(
+    goal: str,
+    brief: ResearchBrief | None = None,
+) -> str:
     """Phase 1: Generate program.md — research codebase, describe problem."""
     return (
         "You are a research task planner for the QwenPaw auto-research system.\n"
-        "Your job: Research the codebase and produce a structured program.md file.\n"
+        "Your job: Produce a structured program.md file from the discovery brief.\n"
         "\n"
         "Steps:\n"
         "1. Analyze the goal to understand the problem.\n"
@@ -644,7 +993,8 @@ def _build_plan_only_prompt(goal: str) -> str:
         "⚠️  TASK_ID must be on its own line BEFORE the file block.\n"
         "⚠️  Do NOT output judge.py or solution.py — only program.md.\n"
         "\n"
-        f"User goal: {goal}"
+        f"User goal: {goal}\n"
+        f"Discovery brief:\n{brief.model_dump_json(indent=2) if brief else '{}'}"
     )
 
 
@@ -989,10 +1339,15 @@ _MAX_ATTEMPTS = 2  # per-phase max attempts (including first try)
 # includes research notes from codebase exploration.
 _PHASE_OUTPUT_LIMITS: dict[str, tuple[int, int]] = {
     # (min_chars, max_chars)
+    "research_brief": (100, 12_000),
     "program.md": (50, 16_000),
     "solution.py": (20, 32_000),
     "judge.py": (50, 16_000),
 }
+
+_PHASE_FAILURE_MARKERS = (
+    "executed maximum iterations of reasoning-acting loop",
+)
 
 
 def _derive_task_id(goal: str) -> str:
@@ -1013,6 +1368,7 @@ async def _run_single_phase(
     max_iters: int,
     timeout: int,
     phase_label: str,
+    require_tools: bool = False,
 ) -> str | None:
     """Run one phase of the split plan pipeline with retries.
 
@@ -1032,20 +1388,31 @@ async def _run_single_phase(
             max_iters=max_iters,
             timeout=timeout,
             output_dir=None,
+            require_tools=require_tools,
         )
 
         if result["status"] != "success":
+            model_name = result.get("model_info", {}).get("model_name", "未知")
+            tool_count = result.get("tool_count", "未知")
+            elapsed = result.get("elapsed_seconds", 0)
+            reason = result.get("error", result["status"])
+            if result["status"] == "config_error" and tool_count == 0:
+                reason = (
+                    f"当前研究会话可用工具数：0，无法查询 GitHub Issues "
+                    f"或搜索代码库。模型：{model_name}；"
+                    f"最大循环：{result.get('max_iters', max_iters)}；"
+                    f"耗时：{elapsed} 秒"
+                )
             _log.warning(
                 "%s attempt %d/%d failed: %s",
                 phase_label, attempt, _MAX_ATTEMPTS,
-                result.get("error", result["status"]),
+                reason,
             )
-            if attempt < _MAX_ATTEMPTS:
+            if attempt < _MAX_ATTEMPTS and result["status"] != "config_error":
                 continue
-            # All retries exhausted
             if ds:
                 ds.status = "failed"
-                ds.error = f"{phase_label} 生成失败（{_MAX_ATTEMPTS} 次尝试均失败）"
+                ds.error = f"{phase_label} 失败：{reason}"
             _dialog_emit(plan_id, "failed", ds.error if ds else f"{phase_label} failed")
             _dialog_close(plan_id)
             return None
@@ -1063,20 +1430,35 @@ async def _run_single_phase(
             result.get("usage", {}).get("output_tokens", "?"),
         )
 
-        if response_len < min_chars:
-            _log.warning(
-                "%s attempt %d: %d chars < min %d — retrying",
-                phase_label, attempt, response_len, min_chars,
+        invalid_response = any(
+            marker in response.lower() for marker in _PHASE_FAILURE_MARKERS
+        )
+        if response_len < min_chars or invalid_response:
+            reason = (
+                (
+                    f"Agent 在 {result.get('max_iters', max_iters)} 次循环内未完成任务。"
+                    f"当前研究会话可用工具数：{result.get('tool_count', '未知')}；"
+                    f"模型：{result.get('model_info', {}).get('model_name', '未知')}；"
+                    f"耗时：{result.get('elapsed_seconds', 0)} 秒"
+                )
+                if invalid_response
+                else f"输出过短（{response_len} 字符 < {min_chars}）"
             )
-            if attempt < _MAX_ATTEMPTS:
+            _log.warning(
+                "%s attempt %d: %s — retrying",
+                phase_label, attempt, reason,
+            )
+            impossible_tool_config = (
+                require_tools and result.get("tool_count") == 0
+            )
+            if attempt < _MAX_ATTEMPTS and not impossible_tool_config:
                 _dialog_emit(plan_id, "retrying",
-                             f"{phase_label} 输出过短（{response_len} 字符 < {min_chars}），"
+                             f"{phase_label} {reason}，"
                              f"重试 {attempt + 1}/{_MAX_ATTEMPTS}...")
                 continue
-            # All retries exhausted with short response
             if ds:
                 ds.status = "failed"
-                ds.error = f"{phase_label} 生成失败：所有尝试输出均过短"
+                ds.error = f"{phase_label} 生成失败：{reason}"
             _dialog_emit(plan_id, "failed", ds.error if ds else f"{phase_label} failed")
             _dialog_close(plan_id)
             return None
@@ -1241,11 +1623,76 @@ async def _execute_dialog_plan(
                 "agent_id": owner_agent_id,
             }
 
+        # ── Discovery: decide what to optimize before planning code ──
+        ds.status = "discovering"
+        _dialog_emit(plan_id, "discovering", "调研当前实现、根因和候选方向...")
+        brief_response = await _run_single_phase(
+            plan_id=plan_id,
+            instruction=_build_discovery_prompt(body.goal, body.rounds),
+            agent_config=agent_config,
+            request_context=_plan_ctx("discovery"),
+            max_iters=20,
+            timeout=600,
+            phase_label="research_brief",
+            require_tools=True,
+        )
+        if brief_response is None:
+            return
+        try:
+            brief = _parse_research_brief(
+                brief_response,
+                goal=body.goal,
+                rounds=body.rounds,
+            )
+        except ValueError as exc:
+            _dialog_emit(plan_id, "retrying", f"ResearchBrief 校验失败，修复格式: {exc}")
+            repaired = await _run_single_phase(
+                plan_id=plan_id,
+                instruction=(
+                    _build_discovery_prompt(body.goal, body.rounds)
+                    + "\nThe previous response failed validation:\n"
+                    + str(exc)
+                ),
+                agent_config=agent_config,
+                request_context=_plan_ctx("discovery-repair"),
+                max_iters=10,
+                timeout=300,
+                phase_label="research_brief",
+                require_tools=True,
+            )
+            if repaired is None:
+                return
+            try:
+                brief = _parse_research_brief(
+                    repaired,
+                    goal=body.goal,
+                    rounds=body.rounds,
+                )
+            except ValueError as repair_error:
+                ds.status = "failed"
+                ds.error = str(repair_error)
+                _dialog_emit(plan_id, "failed", ds.error)
+                _dialog_close(plan_id)
+                return
+        ds.brief = brief.model_dump()
+        direction_titles = "、".join(
+            direction.title
+            for direction in sorted(
+                brief.candidate_directions,
+                key=lambda direction: direction.priority,
+            )[:3]
+        )
+        _dialog_emit(
+            plan_id,
+            "discovery_completed",
+            f"发现 {len(brief.candidate_directions)} 个方向：{direction_titles}",
+        )
+
         # ── Phase 1a: Generate program.md ──
         _dialog_emit(plan_id, "searching", "搜索代码库和 GitHub Issues...")
         program_md = await _run_single_phase(
             plan_id=plan_id,
-            instruction=_build_plan_only_prompt(body.goal),
+            instruction=_build_plan_only_prompt(body.goal, brief),
             agent_config=agent_config,
             request_context=_plan_ctx("plan"),
             max_iters=25,
@@ -1260,152 +1707,22 @@ async def _execute_dialog_plan(
             len(program_md), plan_id,
         )
 
-        # ── Phase 1b: Extract solution code ──
-        _dialog_emit(plan_id, "extracting", "提取当前代码作为 baseline...")
-        solution_code = await _run_single_phase(
-            plan_id=plan_id,
-            instruction=_build_solution_prompt(body.goal, program_md),
-            agent_config=agent_config,
-            request_context=_plan_ctx("solution"),
-            max_iters=15,
-            timeout=300,
-            phase_label="solution.py",
-        )
-        if solution_code is None:
-            return
-
-        _log.info(
-            "Phase 1b: solution.py extracted (%d chars) for %s",
-            len(solution_code), plan_id,
-        )
-
-        # ── Phase 1c: Generate judge.py ──
-        _dialog_emit(plan_id, "writing_judge", "编写评测器...")
-        judge_code = await _run_single_phase(
-            plan_id=plan_id,
-            instruction=_build_judge_prompt(body.goal, program_md, solution_code),
-            agent_config=agent_config,
-            request_context=_plan_ctx("judge"),
-            max_iters=10,
-            timeout=300,
-            phase_label="judge.py",
-        )
-        if judge_code is None:
-            return
-
-        _log.info(
-            "Phase 1c: judge.py generated (%d chars) for %s",
-            len(judge_code), plan_id,
-        )
-
-        # ── Phase 2: Assemble & validate ──
-        _dialog_emit(plan_id, "generating", "验证 3 文件契约...")
-
-        # Extract task_id from program_md BEFORE stripping markers
+        # GitHub issue work is repository-level. Keep the generated proposal
+        # for approval instead of forcing it into the legacy solution.py
+        # single-file benchmark contract.
         task_id_match = re.match(r"^TASK_ID:\s*(\S+)", program_md, re.MULTILINE)
-        task_id = task_id_match.group(1).strip() if task_id_match else _derive_task_id(body.goal)
-
-        # Clean each phase output — strip LLM preamble, extract only the
-        # intended content from <<<FILE:...>>> markers (if present).
-        program_content = _extract_phase_content(program_md, "program.md")
-        solution_content = _extract_phase_content(solution_code, "solution.py")
-        judge_content = _extract_phase_content(judge_code, "judge.py")
-
-        assembled = f"TASK_ID: {task_id}\n"
-        assembled += f"<<<FILE:program.md>>>\n{program_content}\n<<<END>>>\n"
-        assembled += f"<<<FILE:solution.py>>>\n{solution_content}\n<<<END>>>\n"
-        assembled += f"<<<FILE:judge.py>>>\n{judge_content}\n<<<END>>>\n"
-
-        try:
-            task_files = _parse_planning_output(assembled, body.goal)
-        except ValueError as exc:
-            _log.warning("Assembled parse failed: %s", exc)
-            # Last resort: retry with monolithic prompt
-            _dialog_emit(plan_id, "retrying", "组装验证失败，回退到整体重试...")
-            task_files = await _fallback_monolithic_plan(
-                plan_id, body.goal, agent_config, owner_user_id, owner_agent_id, exc,
-            )
-            if task_files is None:
-                return
-
-        _log.info(
-            "Parsed task: id=%s, files=%s, judge_source=%r",
-            task_files.get("task_id"),
-            [k for k in task_files],
-            (task_files.get("judge_source", "") or "")[:500],
+        ds.task_id = (
+            task_id_match.group(1).strip()
+            if task_id_match
+            else _derive_task_id(body.goal)
         )
-
-        ds.status = "creating_task"
-        ds.task_id = task_files["task_id"]
-        ds.task_title = _task_title(task_files["program"], task_files["task_id"])
+        ds.plan_markdown = _extract_phase_content(program_md, "program.md")
+        ds.task_title = _task_title(ds.plan_markdown, ds.task_id)
+        ds.status = "awaiting_approval"
         _dialog_emit(
             plan_id,
-            "creating_task",
-            f"创建研究任务: {ds.task_id} — {ds.task_title}",
-        )
-
-        root = get_research_root()
-        try:
-            task = await asyncio.to_thread(
-                create_research_task,
-                root,
-                task_files["task_id"],
-                task_files["program"],
-                task_files["solution_name"],
-                task_files["solution_source"],
-                task_files["judge_source"],
-            )
-        except ValueError as exc:
-            ds.status = "failed"
-            ds.error = f"Task creation failed: {exc}"
-            _dialog_emit(plan_id, "failed", ds.error)
-            _dialog_close(plan_id)
-            return
-
-        # ── Phase 3: Start research run ──
-        ds.status = "starting_run"
-        run_id = uuid.uuid4().hex
-        ds.run_id = run_id
-        _dialog_emit(plan_id, "starting_run", f"启动研究引擎 ({body.rounds} 轮)...")
-
-        created_at = _utc_now()
-        queued = ResearchRunEvent("queued", created_at)
-        state = ResearchRunState(
-            id=run_id,
-            task_id=task_files["task_id"],
-            agent_id=owner_agent_id,
-            owner_agent_id=owner_agent_id,
-            owner_user_id=owner_user_id,
-            owner_session_id=owner_session_id,
-            status="queued",
-            rounds=body.rounds,
-            completed_rounds=0,
-            outcomes=(),
-            created_at=created_at,
-            events=(queued,),
-            current_round=None,
-            phase="queued",
-            updated_at=created_at,
-        )
-        _runs[run_id] = state
-        _run_auto_pr[run_id] = body.auto_pr
-        _runtime_tasks[run_id] = asyncio.create_task(
-            _execute_run(
-                run_id,
-                task.root,
-                StartResearchRun(
-                    rounds=body.rounds,
-                    agent_id=owner_agent_id,
-                    model=body.model,
-                ),
-            )
-        )
-
-        ds.status = "completed"
-        _dialog_emit(
-            plan_id,
-            "completed",
-            f"研究已启动: task={ds.task_id}, run={run_id}",
+            "awaiting_approval",
+            "研究方案已生成，等待审批后再修改真实仓库。",
         )
         _dialog_close(plan_id)
 
@@ -1471,6 +1788,8 @@ async def get_dialog_status(plan_id: str) -> dict[str, Any]:
         "task_id": ds.task_id,
         "task_title": ds.task_title,
         "run_id": ds.run_id,
+        "brief": ds.brief,
+        "plan_markdown": ds.plan_markdown,
         "error": ds.error,
         "events": ds.events,
         "created_at": ds.created_at,
@@ -1499,7 +1818,7 @@ async def stream_dialog(plan_id: str, request: Request) -> StreamingResponse:
                 yield f"data: {json.dumps({'type': 'event', 'phase': evt['phase'], 'detail': evt.get('detail', '')})}\n\n"
 
             # If already completed/failed, send final event and close
-            if ds.status in ("completed", "failed"):
+            if ds.status in ("completed", "failed", "awaiting_approval"):
                 final = {
                     "type": "done",
                     "status": ds.status,
@@ -1595,15 +1914,12 @@ def _report_event_sse(
     detail: str = "",
 ) -> None:
     _original_report_event(run_id, phase, round_number, detail)
-    _sse_broadcast(
-        run_id,
-        {
-            "type": "event",
-            "phase": phase,
-            "round": round_number,
-            "detail": detail,
-        },
-    )
+    current = _runs.get(run_id)
+    if current and current.events:
+        _sse_broadcast(
+            run_id,
+            {"type": "event", **asdict(current.events[-1])},
+        )
 
 
 # Hook into _report_outcome to broadcast outcomes
@@ -1636,23 +1952,7 @@ async def stream_run(
     Query params:
         after_sequence: skip events with sequence <= this value (resumption).
     """
-    run = _owned_run(run_id)
-
-    # ── Terminal run: immediately send final status and close ──
-    if run.status in _TERMINAL_STATUSES:
-        async def terminal_generator():
-            import json  # noqa: F811
-            yield f"data: {json.dumps({'type': f'run.{run.status}', 'status': run.status, 'error': run.error})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        return StreamingResponse(
-            terminal_generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
+    _owned_run(run_id)  # authorization check before registering a subscriber
 
     # Create a dedicated queue for this subscriber
     q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=256)
@@ -1661,6 +1961,9 @@ async def stream_run(
     if run_id not in _sse_queues:
         _sse_queues[run_id] = set()
     _sse_queues[run_id].add(q)
+    # Re-read after registration. Duplicates are safe because events carry a
+    # sequence; missing an event here would not be recoverable.
+    run = _owned_run(run_id)
 
     async def event_generator():
         try:
@@ -1668,11 +1971,16 @@ async def stream_run(
             for event in run.events:
                 if event.sequence <= after_sequence:
                     continue
-                yield f"data: {json.dumps({'type': 'event', 'phase': event.phase, 'round': event.round, 'detail': event.detail, 'sequence': event.sequence})}\n\n"
+                yield f"data: {json.dumps({'type': 'event', **asdict(event)})}\n\n"
 
             # Replay existing outcomes
             for outcome in run.outcomes:
                 yield f"data: {json.dumps({'type': 'outcome', 'outcome': asdict(outcome)})}\n\n"
+
+            if run.status in _TERMINAL_STATUSES:
+                yield f"data: {json.dumps({'type': f'run.{run.status}', 'status': run.status, 'error': run.error})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
 
             # Stream live events
             while True:

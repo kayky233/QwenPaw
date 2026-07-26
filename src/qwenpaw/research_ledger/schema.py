@@ -77,6 +77,9 @@ class ResearchRun(Base):
         String(64), ForeignKey("research_tasks.task_id", ondelete="CASCADE"), nullable=False
     )
     agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    owner_session_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="running"
     )
@@ -87,6 +90,9 @@ class ResearchRun(Base):
     completed_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_round: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    research_brief: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -179,6 +185,7 @@ class ResearchEvent(Base):
         String(64), ForeignKey("research_runs.run_id", ondelete="CASCADE"), nullable=False
     )
     phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -187,6 +194,14 @@ class ResearchEvent(Base):
 
     # Relationships
     run: Mapped["ResearchRun"] = relationship(back_populates="events")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "sequence",
+            name="uq_research_event_run_sequence",
+        ),
+    )
 
     def __repr__(self) -> str:
         return (

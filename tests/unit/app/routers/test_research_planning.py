@@ -4,11 +4,145 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from qwenpaw.app.routers.research import _parse_planning_output
+from qwenpaw.app.routers.research import (
+    _build_plan_only_prompt,
+    _parse_planning_output,
+    _parse_research_brief,
+)
+
+
+def test_parse_research_brief_uses_authoritative_goal_and_rounds() -> None:
+    brief = _parse_research_brief(
+        """
+        ```json
+        {
+          "goal": "ignore this",
+          "current_behavior": "Concurrent calls can insert twice.",
+          "root_cause_hypotheses": ["The check and insert are not atomic."],
+          "candidate_directions": [{
+            "id": "unique-constraint",
+            "title": "Add a database uniqueness constraint",
+            "priority": 1,
+            "risk": "low",
+            "reason": "It protects every process."
+          }],
+          "success_metrics": ["20 concurrent calls create one row"],
+          "iteration_budget": 99,
+          "modifiable_files": ["src/feedback.py"],
+          "relevant_tests": ["tests/test_feedback.py"]
+        }
+        ```
+        """,
+        goal="Deduplicate submitFeedback",
+        rounds=5,
+    )
+
+    assert brief.goal == "Deduplicate submitFeedback"
+    assert brief.iteration_budget == 5
+    assert brief.candidate_directions[0].id == "unique-constraint"
+
+
+def test_parse_research_brief_rejects_missing_directions() -> None:
+    response = """
+    {
+      "current_behavior": "Duplicate writes.",
+      "root_cause_hypotheses": ["Non-atomic write."],
+      "candidate_directions": [],
+      "success_metrics": ["One row"]
+    }
+    """
+
+    with pytest.raises(ValueError, match="ResearchBrief validation failed"):
+        _parse_research_brief(response, goal="Deduplicate", rounds=3)
+
+
+def test_plan_prompt_includes_discovery_direction() -> None:
+    brief = _parse_research_brief(
+        """
+        {
+          "current_behavior": "Duplicate writes.",
+          "root_cause_hypotheses": ["Non-atomic write."],
+          "candidate_directions": [{
+            "id": "idempotency-key",
+            "title": "Use an idempotency key",
+            "priority": 1,
+            "risk": "medium",
+            "reason": "Works across retries."
+          }],
+          "success_metrics": ["One row"]
+        }
+        """,
+        goal="Deduplicate",
+        rounds=3,
+    )
+
+    assert "idempotency-key" in _build_plan_only_prompt("Deduplicate", brief)
+
+
+@pytest.mark.asyncio
+async def test_dialog_plan_waits_for_approval_without_solution_generation() -> None:
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "plan-awaiting-approval"
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="accepted",
+        goal="Fix one simple GitHub issue",
+        events=[],
+    )
+    brief = """
+    {
+      "current_behavior": "A race can select an occupied port.",
+      "root_cause_hypotheses": ["Port selection and binding are separate."],
+      "candidate_directions": [{
+        "id": "bind-retry",
+        "title": "Retry after a bind conflict",
+        "priority": 1,
+        "risk": "low",
+        "reason": "Small, localized change."
+      }],
+      "success_metrics": ["A bind conflict retries safely."]
+    }
+    """
+    plan = """TASK_ID: retry-cdp-bind
+<<<FILE:program.md>>>
+# Retry CDP bind conflicts
+
+Add a bounded retry around browser startup and cover the race with a test.
+<<<END>>>
+"""
+    run_phase = AsyncMock(side_effect=[brief, plan])
+
+    with (
+        patch.object(research_mod, "_run_single_phase", run_phase),
+        patch.object(
+            research_mod,
+            "_owner_identity",
+            return_value=("default", None, None),
+        ),
+        patch(
+            "qwenpaw.config.config.load_agent_config",
+            return_value=SimpleNamespace(active_model=None),
+        ),
+    ):
+        await research_mod._execute_dialog_plan(
+            plan_id,
+            research_mod.DialogGoalRequest(
+                goal="Fix one simple GitHub issue",
+                rounds=3,
+            ),
+        )
+
+    state = research_mod._dialog_runs.pop(plan_id)
+    assert run_phase.await_count == 2
+    assert state.status == "awaiting_approval"
+    assert "Retry CDP bind conflicts" in state.plan_markdown
+    assert state.run_id is None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -528,6 +662,103 @@ async def test_run_single_phase_retry_short_then_success() -> None:
     assert run_task_mock.await_count == 2, (
         f"Expected 2 calls (short→retry→success), got {run_task_mock.await_count}"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_single_phase_retries_max_iterations_response() -> None:
+    """Agent-loop failure text is not valid generated source, regardless of length."""
+    loop_failure = {
+        "status": "success",
+        "response": (
+            "Executed maximum iterations of reasoning-acting loop "
+            "without finishing the task."
+        ),
+        "model_info": {},
+        "usage": {},
+    }
+    valid_source = {
+        "status": "success",
+        "response": "def solve():\n    return 'valid generated solution'\n",
+        "model_info": {},
+        "usage": {},
+    }
+    run_task_mock = AsyncMock(side_effect=[loop_failure, valid_source])
+
+    with patch("qwenpaw.app.routers.research._run_task", run_task_mock):
+        from qwenpaw.app.routers.research import _run_single_phase
+
+        result = await _run_single_phase(
+            plan_id="test-plan-agent-loop-retry",
+            instruction="generate solution",
+            agent_config=object(),
+            request_context={
+                "session_id": "test-sess", "user_id": "u1",
+                "channel": "test", "agent_id": "a1",
+            },
+            max_iters=5,
+            timeout=30,
+            phase_label="solution.py",
+        )
+
+    assert result == valid_source["response"]
+    assert run_task_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_research_brief_zero_tools_reports_cause_without_retry() -> None:
+    """An impossible Discovery configuration should fail once with diagnostics."""
+    from qwenpaw.app.routers import research as research_mod
+
+    plan_id = "test-plan-discovery-zero-tools"
+    research_mod._dialog_runs[plan_id] = research_mod.DialogRunState(
+        plan_id=plan_id,
+        status="discovering",
+        goal="Inspect GitHub issues",
+        events=[],
+    )
+    loop_failure = {
+        "status": "success",
+        "response": (
+            "Executed maximum iterations of reasoning-acting loop "
+            "without finishing the task."
+        ),
+        "elapsed_seconds": 73.8,
+        "model_info": {"model_name": "deepseek-v4-pro"},
+        "usage": {},
+        "tool_count": 0,
+        "max_iters": 20,
+    }
+    run_task_mock = AsyncMock(return_value=loop_failure)
+
+    try:
+        with patch("qwenpaw.app.routers.research._run_task", run_task_mock):
+            result = await research_mod._run_single_phase(
+                plan_id=plan_id,
+                instruction="research GitHub and the local repository",
+                agent_config=object(),
+                request_context={
+                    "session_id": "test-sess",
+                    "user_id": "u1",
+                    "channel": "test",
+                    "agent_id": "a1",
+                },
+                max_iters=20,
+                timeout=600,
+                phase_label="research_brief",
+                require_tools=True,
+            )
+
+        state = research_mod._dialog_runs[plan_id]
+        assert result is None
+        assert run_task_mock.await_count == 1
+        assert "可用工具数：0" in state.error
+        assert "deepseek-v4-pro" in state.error
+        assert "20" in state.error
+        assert "73.8" in state.error
+        assert state.events[-1]["phase"] == "failed"
+        assert state.events[-1]["detail"] == state.error
+    finally:
+        research_mod._dialog_runs.pop(plan_id, None)
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ import { skillApi } from "../../api/modules/skill";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import { providerApi } from "../../api/modules/provider";
+import { researchApi } from "../../api/modules/research";
 import type { ProviderInfo, ModelInfo, SkillSpec } from "../../api/types";
 import ModelSelector from "./ModelSelector";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -130,8 +131,14 @@ import {
   MAX_QUEUE_SIZE,
   STORAGE_PREFIX,
   withSendLock,
-  holdOwnershipLock,
 } from "../../stores/messageQueueStore";
+import ResearchSidePanel from "../../features/research/ResearchSidePanel";
+import { ResearchChatBridge } from "../../features/research/ResearchChatBridge";
+import {
+  parseResearchCommand,
+  type ResearchCommand,
+} from "../../features/research/researchCommands";
+import { useResearchStore } from "../../features/research/researchStore";
 
 // ---------------------------------------------------------------------------
 // Background queue sender — keeps sending after ChatPage unmounts.
@@ -1249,36 +1256,12 @@ export default function ChatPage() {
     [],
   );
 
-  // Single-tab ownership: only one tab per conversation may send. Other tabs
-  // are queue-only (input is enqueued instead of submitted). The owner is
-  // determined by an exclusive Web Lock keyed by sessionId; when the owner
-  // tab closes, another tab acquires the lock and becomes the owner.
-  const [isOwner, setIsOwner] = useState(false);
-  const [ownershipResolved, setOwnershipResolved] = useState(false);
-  const isOwnerRef = useRef(false);
-  isOwnerRef.current = isOwner;
-  useEffect(() => {
-    setIsOwner(false);
-    setOwnershipResolved(false);
-    const ctrl = new AbortController();
-    void holdOwnershipLock(
-      queueSessionId,
-      () => {
-        setIsOwner(true);
-        setOwnershipResolved(true);
-      },
-      ctrl.signal,
-    );
-    // If the lock callback never fires (e.g. another tab holds it), resolve
-    // after a short delay so the non-owner Alert appears without flashing.
-    const fallbackTimer = setTimeout(() => {
-      setOwnershipResolved(true);
-    }, 300);
-    return () => {
-      ctrl.abort();
-      clearTimeout(fallbackTimer);
-    };
-  }, [queueSessionId]);
+  // The Console uses the current tab as sender. The per-item send lock below
+  // still prevents duplicate queue dispatch without handing control to a
+  // surprising "owner" tab.
+  const isOwner = true;
+  const ownershipResolved = true;
+  const isOwnerRef = useRef(true);
 
   const syncLoopModeStatus = useCallback(() => {
     const backendSessionId =
@@ -1395,6 +1378,13 @@ export default function ChatPage() {
   chatLoadingRef.current = chatLoading;
   const prevChatLoadingRef = useRef<boolean | string>(false);
   const { message } = useAppMessage();
+  const researchPanelOpen = useResearchStore((state) => state.panelOpen);
+  const activeResearchRunId = useResearchStore(
+    (state) => state.activeRunId,
+  );
+  const activeResearchPlanId = useResearchStore(
+    (state) => state.activePlanId,
+  );
   const { approvals, setApprovals } = useApprovalContext();
   const [approvalRequests, setApprovalRequests] = useState<
     Map<string, ApprovalMessageData>
@@ -1430,6 +1420,114 @@ export default function ChatPage() {
       return next;
     });
   }, []);
+
+  const handleResearchCommand = useCallback(
+    async (command: ResearchCommand) => {
+      const store = useResearchStore.getState();
+      if (command.action === "help") {
+        message.info(
+          "/research <目标> · /research status · /research open · /research stop",
+        );
+        return;
+      }
+      if (command.action === "status") {
+        if (!store.activeRunId) {
+          const plan = store.activePlanId
+            ? await researchApi.dialogStatus(store.activePlanId).catch(
+                () => store.plans[store.activePlanId!],
+              )
+            : undefined;
+          if (plan) useResearchStore.getState().updatePlan(plan);
+          message.info(
+            plan
+              ? `AutoResearch 规划中 · ${plan.status}`
+              : "当前没有 AutoResearch 任务",
+          );
+          return;
+        }
+        try {
+          const snapshot = await store.refreshSnapshot(store.activeRunId);
+          message.info(
+            `${snapshot.task_id} · ${snapshot.status} · ${snapshot.current_round ?? 0}/${snapshot.rounds}`,
+          );
+        } catch {
+          message.error("读取研究状态失败");
+        }
+        return;
+      }
+      if (command.action === "open") {
+        if (!store.activeRunId) {
+          if (store.activePlanId) {
+            useResearchStore.setState({ panelOpen: true });
+          } else {
+            message.info("当前没有 AutoResearch 任务");
+          }
+          return;
+        }
+        await store.openRun(store.activeRunId);
+        return;
+      }
+      if (command.action === "stop") {
+        if (!store.activeRunId) {
+          message.info("当前没有可停止的 AutoResearch 任务");
+          return;
+        }
+        try {
+          await store.stopRun(store.activeRunId);
+          message.success("已发送停止请求");
+        } catch {
+          message.error("停止研究失败");
+        }
+        return;
+      }
+
+      if (command.action !== "start") return;
+      const currentPlan = store.activePlanId
+        ? store.plans[store.activePlanId]
+        : undefined;
+      if (
+        currentPlan &&
+        !["completed", "failed", "cancelled"].includes(currentPlan.status)
+      ) {
+        useResearchStore.setState({ panelOpen: true });
+        message.warning("已有研究规划正在运行，已重新打开右侧面板");
+        return;
+      }
+      try {
+        message.info(`开始调研：${command.goal}`);
+        const plan = await researchApi.dialogResearch({
+          goal: command.goal,
+          rounds: 3,
+          auto_pr: false,
+        });
+        useResearchStore.getState().openPlan(plan.plan_id, command.goal);
+        // Planning can legitimately take several model calls; keep the UI synced
+        // instead of freezing it after the old two-minute polling window.
+        for (let attempt = 0; attempt < 3600; attempt += 1) {
+          const status = await researchApi.dialogStatus(plan.plan_id);
+          useResearchStore.getState().updatePlan(status);
+          if (status.status === "awaiting_approval") {
+            message.success("研究方案已生成，请审批后再执行");
+            return;
+          }
+          if (status.status === "completed" && status.run_id) {
+            await useResearchStore.getState().openRun(status.run_id);
+            message.success("研究计划已完成，右侧面板已打开");
+            return;
+          }
+          if (status.status === "failed" || status.status === "cancelled") {
+            message.error(status.error || "研究规划失败");
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        message.warning("研究规划超过一小时，请使用 /research status 刷新状态");
+      } catch {
+        message.error("启动 AutoResearch 失败");
+      }
+    },
+    [message],
+  );
   const [chatSkills, setChatSkills] = useState<SkillSpec[]>([]);
   const consoleSkills = useMemo(
     () => chatSkills.filter(isSkillAvailableInConsole),
@@ -2423,6 +2521,11 @@ export default function ChatPage() {
         value: "skills",
         description: t("chat.commands.skills.description"),
       },
+      {
+        command: "/research",
+        value: "research ",
+        description: "启动或控制 AutoResearch",
+      },
     ];
     const reservedCommands = new Set(
       commandSuggestions.map((item) => item.command.slice(1).trim()),
@@ -2444,6 +2547,17 @@ export default function ChatPage() {
       }));
     const handleBeforeSubmit = async () => {
       if (isComposingRef.current) return false;
+      const commandTextarea = document
+        .querySelector('[class*="sender"]')
+        ?.querySelector("textarea") as HTMLTextAreaElement | null;
+      const researchCommand = parseResearchCommand(
+        commandTextarea?.value ?? "",
+      );
+      if (researchCommand) {
+        setTextareaValue(commandTextarea!, "");
+        void handleResearchCommand(researchCommand);
+        return false;
+      }
       // Single-tab ownership: non-owner tabs are queue-only. Re-route every
       // submit (Enter / send button / programmatic) to the shared queue and
       // abort the actual SDK send. The owner tab will pick the item up via
@@ -3038,6 +3152,7 @@ export default function ChatPage() {
     toggleHistoryPanel,
     handleCompactCommand,
     handleNewCommand,
+    handleResearchCommand,
   ]);
 
   return (
@@ -3056,6 +3171,7 @@ export default function ChatPage() {
             key={refreshKey}
             options={options}
           />
+          <ResearchChatBridge chatRef={chatRef} />
         </div>
 
         {/* Rate-limit guidance banner */}
@@ -3219,8 +3335,15 @@ export default function ChatPage() {
       </div>
       {/* End of main chat area */}
 
+      {researchPanelOpen && (activeResearchRunId || activeResearchPlanId) && (
+        <ResearchSidePanel
+          mode="side-panel"
+          runId={activeResearchRunId}
+        />
+      )}
+
       {/* Right-side history panel (full mode only) */}
-      {effectiveIsFullMode && historyPanelOpen && (
+      {effectiveIsFullMode && historyPanelOpen && !researchPanelOpen && (
         <>
           {isMobile ? (
             <ChatSessionDrawer

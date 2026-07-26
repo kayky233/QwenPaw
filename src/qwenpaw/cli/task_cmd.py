@@ -92,6 +92,7 @@ async def _run_task(
     timeout: int,
     output_dir: str | None,
     skills_dir: str | None = None,
+    require_tools: bool = False,
 ) -> dict:
     from types import SimpleNamespace
 
@@ -132,44 +133,64 @@ async def _run_task(
         )
         builder = AgentBuilder()
         agent = await builder.build(ctx)
+        try:
+            tool_count = sum(
+                len(group.tools)
+                for group in agent.toolkit.tool_groups
+            )
+        except (AttributeError, TypeError):
+            tool_count = 0
 
         t0 = time.monotonic()
-        try:
-            response = await asyncio.wait_for(
-                agent.reply(
-                    [Msg(name="user", role="user", content=[{"type": "text", "text": instruction}])],
+        if require_tools and tool_count == 0:
+            result = {
+                "status": "config_error",
+                "elapsed_seconds": 0.0,
+                "error": (
+                    "This task requires repository or web tools, but the "
+                    "agent was built with zero tools."
                 ),
-                timeout=timeout,
-            )
-            elapsed = time.monotonic() - t0
-            response_text = response.get_text_content() if response else ""
-            result: dict = {
-                "status": "success",
-                "elapsed_seconds": round(elapsed, 2),
-                "response": response_text,
-                "response_length": len(response_text),
-                "instruction_length": len(instruction),
-            }
-        except asyncio.TimeoutError:
-            elapsed = time.monotonic() - t0
-            result = {
-                "status": "timeout",
-                "elapsed_seconds": round(elapsed, 2),
-                "timeout_seconds": timeout,
                 "response": "",
                 "response_length": 0,
                 "instruction_length": len(instruction),
             }
-        except Exception as exc:
-            elapsed = time.monotonic() - t0
-            result = {
-                "status": "error",
-                "elapsed_seconds": round(elapsed, 2),
-                "error": str(exc),
-                "response": "",
-                "response_length": 0,
-                "instruction_length": len(instruction),
-            }
+        else:
+            try:
+                response = await asyncio.wait_for(
+                    agent.reply(
+                        [Msg(name="user", role="user", content=[{"type": "text", "text": instruction}])],
+                    ),
+                    timeout=timeout,
+                )
+                elapsed = time.monotonic() - t0
+                response_text = response.get_text_content() if response else ""
+                result = {
+                    "status": "success",
+                    "elapsed_seconds": round(elapsed, 2),
+                    "response": response_text,
+                    "response_length": len(response_text),
+                    "instruction_length": len(instruction),
+                }
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                result = {
+                    "status": "timeout",
+                    "elapsed_seconds": round(elapsed, 2),
+                    "timeout_seconds": timeout,
+                    "response": "",
+                    "response_length": 0,
+                    "instruction_length": len(instruction),
+                }
+            except Exception as exc:
+                elapsed = time.monotonic() - t0
+                result = {
+                    "status": "error",
+                    "elapsed_seconds": round(elapsed, 2),
+                    "error": str(exc),
+                    "response": "",
+                    "response_length": 0,
+                    "instruction_length": len(instruction),
+                }
 
     # ── Extract model metadata and token usage ──
     usage: dict = {}
@@ -193,6 +214,8 @@ async def _run_task(
         logger.debug("Failed to extract token usage / model info", exc_info=True)
     result["usage"] = usage
     result["model_info"] = model_info
+    result["tool_count"] = tool_count
+    result["max_iters"] = max_iters
 
     # Log the full raw response at debug level for troubleshooting
     response_text = result.get("response", "")

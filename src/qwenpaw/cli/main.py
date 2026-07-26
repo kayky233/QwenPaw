@@ -168,6 +168,11 @@ def _looks_like_project_path(value: str) -> bool:
             ".plugin_commands",
         ),
         "task": ("qwenpaw.cli.task_cmd", "task_cmd", ".task_cmd"),
+        "research": (
+            "qwenpaw.cli.research_cmd",
+            "research_cmd",
+            ".research_cmd",
+        ),
         "doctor": ("qwenpaw.cli.doctor_cmd", "doctor_cmd", ".doctor_cmd"),
         "auto": ("qwenpaw.cli.auto", "auto_group", ".auto"),
     },

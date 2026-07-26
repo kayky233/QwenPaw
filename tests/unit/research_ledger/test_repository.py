@@ -90,7 +90,14 @@ class TestRunOperations:
     async def test_create_and_get_run(self, repo):
         await repo.create_task("task-1", "p", "s.py", "x", "y")
         await repo.create_run(
-            run_id="run-1", task_id="task-1", agent_id="agent-a", rounds=5
+            run_id="run-1",
+            task_id="task-1",
+            agent_id="agent-a",
+            rounds=5,
+            owner_agent_id="owner-a",
+            owner_user_id="user-a",
+            owner_session_id="session-a",
+            research_brief='{"goal":"reduce duplicate writes"}',
         )
         run = await repo.get_run("run-1")
         assert run is not None
@@ -100,6 +107,10 @@ class TestRunOperations:
         assert run.rounds == 5
         assert run.status == "running"
         assert run.phase == "running"
+        assert run.owner_agent_id == "owner-a"
+        assert run.owner_user_id == "user-a"
+        assert run.owner_session_id == "session-a"
+        assert run.research_brief == '{"goal":"reduce duplicate writes"}'
 
     @pytest.mark.asyncio
     async def test_list_runs(self, repo):
@@ -179,12 +190,25 @@ class TestEventOperations:
         await repo.create_task("task-1", "p", "s.py", "x", "y")
         await repo.create_run("run-1", "task-1", "a", 5)
 
-        await repo.record_event("run-1", phase="started", round=None, detail='{"msg":"begin"}')
-        await repo.record_event("run-1", phase="round_complete", round=1)
+        await repo.record_event(
+            "run-1",
+            phase="started",
+            round=None,
+            detail='{"msg":"begin"}',
+            sequence=0,
+        )
+        await repo.record_event(
+            "run-1",
+            phase="round_complete",
+            round=1,
+            sequence=1,
+        )
         events = await repo.list_events("run-1")
         assert len(events) == 2
         assert events[0].phase == "started"
+        assert events[0].sequence == 0
         assert events[1].round == 1
+        assert events[1].sequence == 1
 
 
 class TestDialogRunOperations:

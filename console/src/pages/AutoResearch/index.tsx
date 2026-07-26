@@ -42,8 +42,8 @@ import {
   MessageOutlined,
   CopyOutlined,
 } from "@ant-design/icons";
-import { api, getApiUrl } from "@/api";
-import { buildAuthHeaders } from "@/api/authHeaders";
+import { api } from "@/api";
+import { SseHttpError, streamJsonSse } from "@/api/sse";
 import type {
   ResearchTaskDetail,
   ResearchRunState,
@@ -52,7 +52,12 @@ import type {
 } from "@/api/modules/research";
 import { providerApi } from "@/api/modules/provider";
 import { useAgentStore } from "@/stores/agentStore";
+import { useResearchStore } from "@/features/research/researchStore";
 import styles from "./index.module.less";
+import {
+  latestResearchSequence,
+  nextResearchSequence,
+} from "./researchStreamState";
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -332,8 +337,7 @@ export default function AutoResearchPage() {
   const [planningEvents, setPlanningEvents] = useState<string[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
-  // Separate EventSource for dialog planning SSE (not migrated to fetch-based yet)
-  const dialogEventSourceRef = useRef<EventSource | null>(null);
+  const dialogAbortRef = useRef<AbortController | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -347,6 +351,26 @@ export default function AutoResearchPage() {
   // Track when the last SSE event was received (for "last synced" display)
   const lastSyncedAtRef = useRef<string>("");
 
+  const applyRunSnapshot = useCallback((state: ResearchRunState) => {
+    setRunState(state);
+    lastEventSequenceRef.current = latestResearchSequence(state.events);
+    lastSyncedAtRef.current = state.updated_at;
+  }, []);
+
+  useEffect(() => {
+    if (!runId || !runState) return;
+    useResearchStore.setState((state) => ({
+      activeRunId: runId,
+      panelOpen: true,
+      snapshots: { ...state.snapshots, [runId]: runState },
+      connectionStates: {
+        ...state.connectionStates,
+        [runId]: connectionState,
+      },
+      errors: { ...state.errors, [runId]: error },
+    }));
+  }, [runId, runState, connectionState, error]);
+
   // ── Schedule SSE reconnection with exponential backoff ──
   const scheduleReconnect = useCallback((rId: string) => {
     const attempt = reconnectAttemptsRef.current++;
@@ -357,7 +381,7 @@ export default function AutoResearchPage() {
       try {
         const state = await api.getRun(rId);
         if (activeRunIdRef.current !== rId) return;
-        setRunState(state);
+        applyRunSnapshot(state);
         if (["queued", "running"].includes(state.status)) {
           connectSSERef.current?.(rId);
         } else {
@@ -378,12 +402,13 @@ export default function AutoResearchPage() {
         }
       }
     }, delay);
-  }, [taskId]);
+  }, [taskId, applyRunSnapshot]);
 
   // ── Cleanup SSE and reconnect timers ──
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      dialogAbortRef.current?.abort();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -407,73 +432,35 @@ export default function AutoResearchPage() {
     const params = new URLSearchParams();
     if (afterSeq >= 0) params.set("after_sequence", String(afterSeq));
     const qs = params.toString();
-    const sseUrl = getApiUrl(`/research/runs/${rId}/stream`) + (qs ? `?${qs}` : "");
+    const streamPath = `/research/runs/${rId}/stream${qs ? `?${qs}` : ""}`;
 
     (async () => {
+      let terminalReceived = false;
       try {
-        const response = await fetch(sseUrl, {
-          headers: buildAuthHeaders(),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          // Auth failure (401/403) or not found (404) — don't retry
-          if (response.status === 401 || response.status === 403 || response.status === 404) {
-            setConnectionState("disconnected");
-            setError(`SSE 连接被拒绝 (${response.status})，请检查权限或刷新页面。`);
-            return;
-          }
-          throw new Error(`SSE HTTP ${response.status}`);
-        }
-
         setConnectionState("connected");
         reconnectAttemptsRef.current = 0;
-
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No response body");
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          // Keep incomplete last line in buffer
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice(6);
-            if (!payload) continue;
-
-            let data: Record<string, unknown>;
-            try {
-              data = JSON.parse(payload);
-            } catch {
-              continue;
+        await streamJsonSse(streamPath, controller.signal, (data) => {
+            // Guard: stale connection
+            if (activeRunIdRef.current !== rId || abortRef.current !== controller) {
+              return false;
             }
 
-            // Guard: stale connection
-            if (activeRunIdRef.current !== rId || abortRef.current !== controller) return;
-
             if (data.type === "event") {
-              // Use sequence for dedup
-              if (typeof data.sequence === "number") {
-                if (data.sequence <= afterSeq) continue;
-                lastEventSequenceRef.current = data.sequence as number;
-              }
+              const sequence = nextResearchSequence(
+                lastEventSequenceRef.current,
+                data.sequence,
+              );
+              if (sequence === null) return;
+              lastEventSequenceRef.current = sequence;
               lastSyncedAtRef.current = new Date().toISOString();
 
               setRunState((prev) => {
                 const newEvent = {
                   phase: data.phase as string,
                   timestamp: (data.timestamp as string) ?? new Date().toISOString(),
-                  round: data.round as number | null | undefined,
+                  round: typeof data.round === "number" ? data.round : null,
                   detail: (data.detail as string) || "",
-                  sequence: data.sequence as number,
+                  sequence,
                 };
                 if (!prev) {
                   return {
@@ -560,7 +547,7 @@ export default function AutoResearchPage() {
               data.type === "run.failed" ||
               data.type === "run.cancelled"
             ) {
-              reader.cancel().catch(() => {});
+              terminalReceived = true;
               setConnectionState("connected");
               if (data.type === "run.completed" || data.status === "completed") {
                 setPhase("succeeded");
@@ -571,13 +558,29 @@ export default function AutoResearchPage() {
                 setPhase("failed");
                 setError((data.error as string) ?? "研究执行失败");
               }
-              return;
+              return false;
             }
-          }
+          },
+        );
+        if (
+          !terminalReceived &&
+          !controller.signal.aborted &&
+          activeRunIdRef.current === rId &&
+          abortRef.current === controller
+        ) {
+          scheduleReconnect(rId);
         }
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (activeRunIdRef.current !== rId) return;
+        if (
+          err instanceof SseHttpError &&
+          [401, 403, 404].includes(err.status)
+        ) {
+          setConnectionState("disconnected");
+          setError(`SSE 连接被拒绝 (${err.status})，请检查权限或刷新页面。`);
+          return;
+        }
 
         // Attempt reconnection
         if (reconnectAttemptsRef.current < 5) {
@@ -588,7 +591,7 @@ export default function AutoResearchPage() {
         }
       }
     })();
-  }, [taskId, scheduleReconnect]);
+  }, [scheduleReconnect]);
   // Keep ref in sync to break circular dependency with scheduleReconnect
   connectSSERef.current = connectSSE;
 
@@ -602,14 +605,14 @@ export default function AutoResearchPage() {
     try {
       const initialState = await api.getRun(runId);
       if (activeRunIdRef.current !== runId) return;
-      setRunState(initialState);
+      applyRunSnapshot(initialState);
     } catch {
       if (activeRunIdRef.current !== runId) return;
       setRunState(null);
     }
     if (activeRunIdRef.current !== runId) return;
     connectSSE(runId);
-  }, [connectSSE]);
+  }, [connectSSE, applyRunSnapshot]);
 
   // ── Load task when taskId is known ──
   useEffect(() => {
@@ -635,7 +638,7 @@ export default function AutoResearchPage() {
         setTaskId(urlTaskId);
         setRunId(urlRunId);
         setTaskTitle(taskData.title);
-        setRunState(runData);
+        applyRunSnapshot(runData);
         setTask(taskData);
 
         const status = runData.status;
@@ -666,67 +669,17 @@ export default function AutoResearchPage() {
 
     loadExistingRun();
     return () => { cancelled = true; };
-  }, [urlTaskId, urlRunId, startRunStream]);
+  }, [urlTaskId, urlRunId, startRunStream, applyRunSnapshot, setSearchParams]);
 
   // ── Connect dialog-planning SSE ──
   const connectDialogSSE = useCallback((planId: string) => {
     activePlanIdRef.current = planId;
-    dialogEventSourceRef.current?.close();
+    dialogAbortRef.current?.abort();
+    const controller = new AbortController();
+    dialogAbortRef.current = controller;
 
-    const sseUrl = getApiUrl(`/research/dialog/${planId}/stream`);
-    const es = new EventSource(sseUrl);
-    dialogEventSourceRef.current = es;
-
-    es.onmessage = (event) => {
-      try {
-        // Stale connection guard
-        if (activePlanIdRef.current !== planId || dialogEventSourceRef.current !== es) return;
-        const data = JSON.parse(event.data);
-        if (data.type === "event") {
-          const label = DIALOG_PHASE_LABELS[data.phase] ?? data.phase;
-          const detail = data.detail ? ` — ${data.detail}` : "";
-          setPlanningEvents((prev) => [...prev, `${label}${detail}`]);
-        } else if (data.type === "done") {
-          es.close();
-          dialogEventSourceRef.current = null;
-          activePlanIdRef.current = null;
-
-          if (data.status === "failed") {
-            setPhase("idle");
-            setError(data.error || "规划失败");
-            setPlanningEvents((prev) => [...prev, `❌ ${data.error || "规划失败"}`]);
-            return;
-          }
-          if (data.status === "cancelled") {
-            setPhase("idle");
-            setError("研究已取消");
-            setPlanningEvents((prev) => [...prev, `⏹️ 研究已取消`]);
-            return;
-          }
-
-          // Planning succeeded — switch to research phase
-          setPlanningEvents((prev) => [...prev, "✅ 研究引擎已启动"]);
-          if (data.task_id) {
-            setTaskId(data.task_id);
-            setTaskTitle(data.task_title ?? null);
-          }
-          if (data.run_id) {
-            setRunId(data.run_id);
-            setPhase("running");
-            startRunStream(data.run_id);
-          }
-        }
-      } catch {
-        // ignore parse errors
-      }
-    };
-
-    es.onerror = () => {
-      es.close();
-      dialogEventSourceRef.current = null;
+    const pollAfterDisconnect = () => {
       if (activePlanIdRef.current !== planId) return;
-
-      // Retry polling — dialog might have finished while SSE dropped
       let pollCount = 0;
       const maxPolls = 10;
       const pollInterval = 2000;
@@ -772,6 +725,71 @@ export default function AutoResearchPage() {
 
       poll();
     };
+
+    void streamJsonSse(
+      `/research/dialog/${planId}/stream`,
+      controller.signal,
+      (data) => {
+        if (
+          activePlanIdRef.current !== planId ||
+          dialogAbortRef.current !== controller
+        ) {
+          return false;
+        }
+        if (data.type === "event") {
+          const phaseName = String(data.phase ?? "");
+          const label = DIALOG_PHASE_LABELS[phaseName] ?? phaseName;
+          const detail = data.detail ? ` — ${data.detail}` : "";
+          setPlanningEvents((prev) => [...prev, `${label}${detail}`]);
+          return;
+        }
+        if (data.type !== "done") return;
+
+        dialogAbortRef.current = null;
+        activePlanIdRef.current = null;
+        if (data.status === "failed") {
+          setPhase("idle");
+          setError(String(data.error || "规划失败"));
+          setPlanningEvents((prev) => [
+            ...prev,
+            `❌ ${String(data.error || "规划失败")}`,
+          ]);
+          return false;
+        }
+        if (data.status === "cancelled") {
+          setPhase("idle");
+          setError("研究已取消");
+          setPlanningEvents((prev) => [...prev, "⏹️ 研究已取消"]);
+          return false;
+        }
+
+        setPlanningEvents((prev) => [...prev, "✅ 研究引擎已启动"]);
+        if (typeof data.task_id === "string") {
+          setTaskId(data.task_id);
+          setTaskTitle(
+            typeof data.task_title === "string" ? data.task_title : null,
+          );
+        }
+        if (typeof data.run_id === "string") {
+          setRunId(data.run_id);
+          setPhase("running");
+          startRunStream(data.run_id);
+        }
+        return false;
+      },
+    )
+      .then(() => {
+        if (
+          !controller.signal.aborted &&
+          activePlanIdRef.current === planId
+        ) {
+          pollAfterDisconnect();
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (activePlanIdRef.current === planId) pollAfterDisconnect();
+      });
   }, [startRunStream]);
 
   // ── Start dialog research (async: returns immediately, SSE for progress) ──
@@ -808,7 +826,7 @@ export default function AutoResearchPage() {
     try {
       const state = await api.getRun(runId);
       if (activeRunIdRef.current !== runId) return;
-      setRunState(state);
+      applyRunSnapshot(state);
       if (state.status === "completed") {
         setPhase("succeeded");
         setConnectionState("connected");
@@ -835,14 +853,14 @@ export default function AutoResearchPage() {
       if (activeRunIdRef.current !== runId) return;
       setError("恢复连接失败，请稍后重试");
     }
-  }, [runId, taskId, connectSSE]);
+  }, [runId, taskId, connectSSE, applyRunSnapshot]);
 
   // ── Reset ──
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    dialogEventSourceRef.current?.close();
-    dialogEventSourceRef.current = null;
+    dialogAbortRef.current?.abort();
+    dialogAbortRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -872,7 +890,10 @@ export default function AutoResearchPage() {
   const baselineBugs: number = (baselineMetrics.bugs as number) ?? 0;
   const baselineScore: number = baselineEval?.score ?? 0;
 
-  const outcomes: ResearchRunOutcome[] = runState?.outcomes ?? [];
+  const outcomes: ResearchRunOutcome[] = useMemo(
+    () => runState?.outcomes ?? [],
+    [runState?.outcomes],
+  );
   const keptOutcomes = outcomes.filter((o) => o.status === "kept");
   const rejectedOutcomes = outcomes.filter((o) => o.status === "rejected");
   const latestKeptOutcome = [...outcomes].reverse().find((o) => o.status === "kept");

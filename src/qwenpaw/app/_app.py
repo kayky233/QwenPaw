@@ -55,6 +55,10 @@ from .routers.approval import router as approval_router
 from .routers.coding_mode import router as coding_mode_router
 from .routers.healthz import router as healthz_router
 from .routers.loops import router as loops_router
+from .routers.research import (
+    close_research_ledger,
+    initialize_research_ledger,
+)
 from .routers.tool_calls import router as tool_calls_router
 from .routers.voice import voice_router
 
@@ -492,6 +496,15 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                 exc_info=True,
             )
 
+    try:
+        await initialize_research_ledger(
+            os.environ.get("QWENPAW_RESEARCH_DATABASE_URL"),
+        )
+    except Exception:
+        logger.exception(
+            "Research Ledger initialization failed; using in-memory run state",
+        )
+
     _bg_task = asyncio.create_task(_background_startup())
 
     try:
@@ -502,6 +515,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             _bg_task.cancel()
             with suppress(asyncio.CancelledError):
                 await _bg_task
+        await close_research_ledger()
 
         # ==================== Execute Shutdown Hooks ====================
         plugin_registry = getattr(app.state, "plugin_registry", None)

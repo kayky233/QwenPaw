@@ -53,6 +53,16 @@ class TestResearchRun:
         cs = {c.name: c for c in ResearchRun.__table__.constraints if c.name}
         assert "uq_research_runs_run_id" in cs
 
+    def test_owner_identity_columns(self):
+        cols = ResearchRun.__table__.columns
+        assert not cols["owner_agent_id"].nullable
+        assert cols["owner_user_id"].nullable
+        assert cols["owner_session_id"].nullable
+
+    def test_research_brief_is_persisted(self):
+        column = ResearchRun.__table__.columns["research_brief"]
+        assert not column.nullable
+
 
 class TestResearchOutcome:
     def test_primary_key_is_id(self):
@@ -69,6 +79,11 @@ class TestResearchOutcome:
 class TestResearchEvent:
     def test_round_nullable(self):
         assert ResearchEvent.__table__.columns["round"].nullable
+
+    def test_sequence_is_persisted_and_unique_per_run(self):
+        assert not ResearchEvent.__table__.columns["sequence"].nullable
+        cs = {c.name: c for c in ResearchEvent.__table__.constraints if c.name}
+        assert "uq_research_event_run_sequence" in cs
 
 
 class TestResearchDialogRun:

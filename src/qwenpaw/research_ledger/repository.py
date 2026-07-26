@@ -13,6 +13,7 @@ from typing import Optional, Sequence
 
 from sqlalchemy import (
     delete,
+    func,
     insert,
     select,
     update,
@@ -67,6 +68,11 @@ class BaseResearchLedgerRepository(ABC):
         task_id: str,
         agent_id: str,
         rounds: int,
+        *,
+        owner_agent_id: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        owner_session_id: Optional[str] = None,
+        research_brief: str = "{}",
     ) -> ResearchRun: ...
 
     @abstractmethod
@@ -74,6 +80,9 @@ class BaseResearchLedgerRepository(ABC):
 
     @abstractmethod
     async def list_runs(self, task_id: str, limit: int = 50) -> Sequence[ResearchRun]: ...
+
+    @abstractmethod
+    async def list_recent_runs(self, limit: int = 500) -> Sequence[ResearchRun]: ...
 
     @abstractmethod
     async def update_run_status(
@@ -131,6 +140,7 @@ class BaseResearchLedgerRepository(ABC):
         phase: str,
         round: Optional[int],
         detail: str = "{}",
+        sequence: Optional[int] = None,
     ) -> ResearchEvent: ...
 
     @abstractmethod
@@ -310,6 +320,11 @@ class PostgresResearchLedgerRepository(BaseResearchLedgerRepository):
         task_id: str,
         agent_id: str,
         rounds: int,
+        *,
+        owner_agent_id: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        owner_session_id: Optional[str] = None,
+        research_brief: str = "{}",
     ) -> ResearchRun:
         engine = self._get_engine()
         now = datetime.now(timezone.utc)
@@ -319,6 +334,10 @@ class PostgresResearchLedgerRepository(BaseResearchLedgerRepository):
                     run_id=run_id,
                     task_id=task_id,
                     agent_id=agent_id,
+                    owner_agent_id=owner_agent_id or agent_id,
+                    owner_user_id=owner_user_id,
+                    owner_session_id=owner_session_id,
+                    research_brief=research_brief,
                     rounds=rounds,
                     status="running",
                     phase="running",
@@ -342,6 +361,16 @@ class PostgresResearchLedgerRepository(BaseResearchLedgerRepository):
             result = await conn.execute(
                 select(ResearchRun)
                 .where(ResearchRun.task_id == task_id)
+                .order_by(ResearchRun.created_at.desc())
+                .limit(limit)
+            )
+            return [ResearchRun(**r._mapping) for r in result.all()]
+
+    async def list_recent_runs(self, limit: int = 500) -> Sequence[ResearchRun]:
+        engine = self._get_engine()
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                select(ResearchRun)
                 .order_by(ResearchRun.created_at.desc())
                 .limit(limit)
             )
@@ -456,12 +485,27 @@ class PostgresResearchLedgerRepository(BaseResearchLedgerRepository):
         phase: str,
         round: Optional[int],
         detail: str = "{}",
+        sequence: Optional[int] = None,
     ) -> ResearchEvent:
         engine = self._get_engine()
         async with engine.begin() as conn:
+            if sequence is None:
+                result = await conn.execute(
+                    select(func.max(ResearchEvent.sequence)).where(
+                        ResearchEvent.run_id == run_id
+                    )
+                )
+                last_sequence = result.scalar_one_or_none()
+                sequence = 0 if last_sequence is None else last_sequence + 1
             result = await conn.execute(
                 insert(ResearchEvent)
-                .values(run_id=run_id, phase=phase, round=round, detail=detail)
+                .values(
+                    run_id=run_id,
+                    phase=phase,
+                    round=round,
+                    detail=detail,
+                    sequence=sequence,
+                )
                 .returning(ResearchEvent)
             )
             event_row = result.one()
@@ -473,7 +517,7 @@ class PostgresResearchLedgerRepository(BaseResearchLedgerRepository):
             result = await conn.execute(
                 select(ResearchEvent)
                 .where(ResearchEvent.run_id == run_id)
-                .order_by(ResearchEvent.timestamp)
+                .order_by(ResearchEvent.sequence)
             )
             return [ResearchEvent(**r._mapping) for r in result.all()]
 
