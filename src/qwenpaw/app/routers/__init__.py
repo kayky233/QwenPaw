@@ -36,15 +36,17 @@ from .pawapps import router as pawapps_router
 from . import research as research_module
 from .research import router as research_router
 from .research_dialog_service import install_research_dialog_service
+from .research_github_service import install_research_github_service
 from .research_scope import install_research_scope_policy
 from .research_state_machine import install_research_state_machine
 
 # Keep the public research router API stable while moving security-sensitive
-# scope parsing, dialog state helpers, and lifecycle rules into small,
-# independently testable modules.
+# scope parsing, dialog state helpers, GitHub helpers, and lifecycle rules into
+# small, independently testable modules.
 install_research_scope_policy(research_module)
 install_research_state_machine(research_module)
 install_research_dialog_service(research_module)
+install_research_github_service(research_module)
 
 router = APIRouter()
 
