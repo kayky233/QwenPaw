@@ -27,9 +27,15 @@ class CampaignChangeRequestDeliverer:
     """Commit and push a candidate, then create a draft PR or MR.
 
     The publisher is the only component allowed to mint a verified COMMIT
-    artifact. The change-request provider is invoked only after that artifact
-    passes the run-level evidence gate.
+    artifact. Pre-delivery evidence is checked before the publisher is invoked,
+    so callers cannot accidentally commit an untested or unreviewed candidate.
     """
+
+    PRE_DELIVERY_REQUIRED = (
+        ResearchArtifactType.CODE_DIFF,
+        ResearchArtifactType.TEST_RESULT,
+        ResearchArtifactType.REPORT,
+    )
 
     def __init__(
         self,
@@ -52,15 +58,30 @@ class CampaignChangeRequestDeliverer:
         candidate: CampaignCandidate,
         artifacts: tuple[ResearchArtifactContract, ...],
     ) -> CampaignDeliveryReceipt:
+        repository = ResearchArtifactRepository()
+        for artifact in artifacts:
+            repository.add(artifact)
+        missing = tuple(
+            artifact_type.value
+            for artifact_type in self.PRE_DELIVERY_REQUIRED
+            if not repository.has_verified_type_for_run(
+                episode.run_id,
+                artifact_type,
+            )
+        )
+        if missing:
+            raise RuntimeError(
+                "campaign publication blocked; missing verified artifacts: "
+                + ", ".join(missing)
+            )
+
         publication = await self.publisher.publish(
             episode,
             candidate.checkpoint,
         )
         publication.validate(episode.run_id)
+        repository.add(publication.artifact)
 
-        repository = ResearchArtifactRepository()
-        for artifact in (*artifacts, publication.artifact):
-            repository.add(artifact)
         delivery = EvidenceGatedDelivery(repository, self.provider)
         request = ChangeRequest(
             repository=episode.repository,
