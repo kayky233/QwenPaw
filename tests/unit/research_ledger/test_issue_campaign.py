@@ -21,6 +21,7 @@ from qwenpaw.research_ledger.execution_runner import (
     CommandResult,
     ExecutionCapabilities,
 )
+from qwenpaw.research_ledger.impact_analysis import ImpactSet
 from qwenpaw.research_ledger.issue_campaign import (
     CampaignCandidate,
     CampaignReview,
@@ -66,8 +67,16 @@ class QueueExecutionRunner:
             argv=request.argv,
             cwd=request.cwd,
             exit_code=exit_code,
-            stdout="1 passed" if exit_code == 0 else "FAILED tests/test_cache.py::test_expiry",
-            stderr="" if exit_code == 0 else "AssertionError: expired item returned",
+            stdout=(
+                "1 passed"
+                if exit_code == 0
+                else "FAILED tests/test_cache.py::test_expiry"
+            ),
+            stderr=(
+                ""
+                if exit_code == 0
+                else "AssertionError: expired item returned"
+            ),
             duration_seconds=0.1,
             runner_name="QueueExecutionRunner",
         )
@@ -155,10 +164,12 @@ def _prepared():
         title="Fix cache expiry",
         description="expired entries remain visible",
     )
+    source_paths = ("src/qwenpaw/memory/cache.py",)
+    test_paths = ("tests/unit/test_cache.py",)
     context = RepositoryContextPack(
         items=(),
-        affected_paths=("src/qwenpaw/memory/cache.py",),
-        test_paths=("tests/unit/test_cache.py",),
+        affected_paths=source_paths,
+        test_paths=test_paths,
         estimated_tokens=20,
         truncated=False,
         graph_available=True,
@@ -173,11 +184,18 @@ def _prepared():
         analysis=RepositoryAnalysis(
             anchors=("cache",),
             candidate_nodes=(),
-            affected_paths=("src/qwenpaw/memory/cache.py",),
+            affected_paths=source_paths,
             test_nodes=(),
             graph_available=True,
         ),
         context_pack=context,
+        impact_set=ImpactSet(
+            source_paths=source_paths,
+            test_paths=test_paths,
+            symbols=(),
+            reasons=("anchor:cache",),
+        ),
+        selected_tests=(),
     )
     return PreparedIssueSolve(
         evidence=IssueEvidence(
