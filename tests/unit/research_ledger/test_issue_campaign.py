@@ -4,6 +4,10 @@ from dataclasses import dataclass
 
 import pytest
 
+from qwenpaw.research_ledger.campaign_delivery_contract import (
+    CampaignDeliveryReceipt,
+    CampaignPublication,
+)
 from qwenpaw.research_ledger.candidate_checkpoint import CandidateCheckpoint
 from qwenpaw.research_ledger.change_request_delivery import ChangeRequestResult
 from qwenpaw.research_ledger.collaboration_contracts import (
@@ -94,12 +98,13 @@ class CandidateExecutor:
     async def execute(self, episode, attempt, feedback):
         self.feedback.append(feedback)
         parent = episode.base_revision if attempt == 1 else f"tree-{attempt - 1}"
+        digest = "bad" if self.invalid_hash else str(attempt) * 64
         checkpoint = CandidateCheckpoint(
             candidate_id=f"candidate-{attempt}",
             run_id=episode.run_id,
             parent_revision=parent,
             tree_revision=f"tree-{attempt}",
-            diff_hash="bad" if self.invalid_hash else str(attempt) * 64,
+            diff_hash=digest,
             risk_score=0.1,
         )
         diff = ResearchArtifactContract(
@@ -108,7 +113,7 @@ class CandidateExecutor:
             step_id=f"{episode.run_id}-implement",
             artifact_type=ResearchArtifactType.CODE_DIFF,
             path="candidate.patch",
-            content_hash=str(attempt) * 64,
+            content_hash=digest,
             verified=True,
             metadata={"changed_paths": list(self.changed_paths)},
         )
@@ -118,8 +123,12 @@ class CandidateExecutor:
 class SequenceReviewer:
     def __init__(self, verdicts):
         self.verdicts = list(verdicts)
+        self.received_artifact_types = []
 
     async def review(self, episode, candidate, artifacts):
+        self.received_artifact_types.append(
+            {artifact.artifact_type for artifact in artifacts}
+        )
         verdict = self.verdicts.pop(0)
         decision = ReviewDecision(
             run_id=episode.run_id,
@@ -151,9 +160,48 @@ class RecordingDeliverer:
 
     async def deliver(self, episode, candidate, artifacts):
         self.calls += 1
-        return ChangeRequestResult(
+        assert ResearchArtifactType.COMMIT not in {
+            artifact.artifact_type for artifact in artifacts
+        }
+        commit_sha = "c" * 40
+        commit = ResearchArtifactContract(
+            artifact_id=f"{candidate.checkpoint.candidate_id}-commit",
+            run_id=episode.run_id,
+            step_id=f"{episode.run_id}-delivery",
+            artifact_type=ResearchArtifactType.COMMIT,
+            path=f"git://{commit_sha}",
+            content_hash=ResearchArtifactContract.hash_content(commit_sha),
+            verified=True,
+            metadata={
+                "commit_sha": commit_sha,
+                "head_branch": "autoresearch/candidate",
+            },
+        )
+        publication = CampaignPublication(
+            commit_sha=commit_sha,
+            head_branch="autoresearch/candidate",
+            artifact=commit,
+        )
+        change_request = ChangeRequestResult(
             url="https://github.com/owner/repo/pull/99",
             number=99,
+        )
+        pull_request = ResearchArtifactContract(
+            artifact_id="pull-request-99",
+            run_id=episode.run_id,
+            step_id=f"{episode.run_id}-delivery",
+            artifact_type=ResearchArtifactType.PULL_REQUEST,
+            path=change_request.url,
+            content_hash=ResearchArtifactContract.hash_content(
+                change_request.url
+            ),
+            verified=True,
+            metadata={"number": 99, "commit_sha": commit_sha},
+        )
+        return CampaignDeliveryReceipt(
+            change_request=change_request,
+            publication=publication,
+            artifacts=(commit, pull_request),
         )
 
 
@@ -202,7 +250,7 @@ def _prepared():
             repository="owner/repo",
             number=12,
             title="Fix cache expiry",
-            body="expired entries remain visible",
+            body="expired cache entries remain visible",
             state="open",
             labels=("bug",),
         ),
@@ -253,9 +301,14 @@ async def test_issue_campaign_repairs_then_delivers_verified_candidate():
     assert len(outcome.attempts) == 2
     assert outcome.evidence.ready
     assert outcome.delivery.number == 99
+    assert outcome.delivery_receipt.publication.commit_sha == "c" * 40
     assert deliverer.calls == 1
     assert "Failure signature:" in executor.feedback[1]
     assert outcome.artifacts[-1].artifact_type == ResearchArtifactType.PULL_REQUEST
+    assert all(
+        ResearchArtifactType.COMMIT not in artifact_types
+        for artifact_types in reviewer.received_artifact_types
+    )
 
 
 @pytest.mark.asyncio
@@ -274,7 +327,7 @@ async def test_issue_campaign_blocks_out_of_scope_diff_before_delivery():
     )
 
     assert outcome.status == IssueCampaignStatus.BLOCKED
-    assert outcome.reason == "episode_evidence_gate_failed"
+    assert outcome.reason == "pre_delivery_evidence_gate_failed"
     assert outcome.evidence.scope_violations == (
         "src/qwenpaw/app/routers/research.py",
     )
