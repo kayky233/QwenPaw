@@ -16,14 +16,22 @@ class _Dialog:
     owner_session_id: str = "chat-1"
 
 
-def test_task_spec_api_adds_resolved_contract_without_owner_fields() -> None:
-    module = SimpleNamespace(
+def _module() -> SimpleNamespace:
+    return SimpleNamespace(
         _dialog_runtime_context={},
         _dialog_payload=lambda dialog: {
             "plan_id": dialog.plan_id,
             "goal": dialog.goal,
         },
+        _build_dialog_pr_body=lambda dialog: (
+            "## AutoResearch Result\n\n"
+            f"- Goal: {dialog.goal}\n"
+        ),
     )
+
+
+def test_task_spec_api_adds_resolved_contract_without_owner_fields() -> None:
+    module = _module()
     install_research_task_spec_api(module)
 
     payload = module._dialog_payload(_Dialog())
@@ -39,11 +47,20 @@ def test_task_spec_api_adds_resolved_contract_without_owner_fields() -> None:
     ]
 
 
+def test_task_spec_api_adds_contract_to_pr_body() -> None:
+    module = _module()
+    install_research_task_spec_api(module)
+
+    body = module._build_dialog_pr_body(_Dialog())
+
+    assert "- Task Type: `feature`" in body
+    assert "- Delivery Mode: `pull_request`" in body
+    assert "- Validation Baseline: `informational`" in body
+    assert "- Goal: Add memory TTL support" in body
+
+
 def test_task_spec_api_leaves_non_dialog_payload_unchanged() -> None:
-    module = SimpleNamespace(
-        _dialog_runtime_context={},
-        _dialog_payload=lambda dialog: {"goal": dialog.goal},
-    )
+    module = _module()
     install_research_task_spec_api(module)
 
     payload = module._dialog_payload(
@@ -64,9 +81,13 @@ def test_real_router_exposes_task_spec_in_dialog_payload() -> None:
         goal="Refactor the repository service",
         events=[],
         plan_markdown="# Plan\n\nTask Type: refactor\n",
+        validation_report="# Validation\n\nPassed.",
+        branch="autoresearch/refactor-task-planreal",
+        commit_sha="a" * 40,
     )
     try:
         payload = research_module._dialog_payload(dialog)
+        body = research_module._build_dialog_pr_body(dialog)
 
         assert payload["task_spec"]["task_type"] == "refactor"
         assert payload["task_spec"]["validation"][
@@ -76,6 +97,8 @@ def test_real_router_exposes_task_spec_in_dialog_payload() -> None:
             "refactor"
         )
         assert "owner_agent_id" not in payload
+        assert "- Task Type: `refactor`" in body
+        assert "- Validation Baseline: `must_pass`" in body
         assert research_module._task_spec_api_installed is True
     finally:
         research_module._dialog_runtime_context.pop(plan_id, None)
