@@ -30,7 +30,11 @@ def dialog_payload(dialog: Any) -> dict[str, Any]:
     return payload
 
 
-def recover_legacy_scope_failure(dialog: Any, *, timestamp: str | None = None) -> Any:
+def recover_legacy_scope_failure(
+    dialog: Any,
+    *,
+    timestamp: str | None = None,
+) -> Any:
     """Upgrade a pre-recovery scope failure while preserving its worktree."""
 
     marker = "paths not listed in the approved plan:"
