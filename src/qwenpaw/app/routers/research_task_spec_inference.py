@@ -14,6 +14,7 @@ from .research_task_spec import (
     validation_contract_for,
 )
 
+_LEGACY_INFER_TASK_TYPE = task_spec_module.infer_task_type
 
 _PATTERNS: tuple[tuple[ResearchTaskType, re.Pattern[str]], ...] = (
     (
@@ -72,7 +73,7 @@ def infer_multilingual_task_type(
 ) -> tuple[ResearchTaskType, str, float, str]:
     """Infer English or Chinese intent while preserving explicit declarations."""
 
-    explicit = task_spec_module.infer_task_type(goal, plan_markdown)
+    explicit = _LEGACY_INFER_TASK_TYPE(goal, plan_markdown)
     if explicit[1] == "explicit_plan":
         return explicit
 
