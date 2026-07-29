@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -7,6 +7,7 @@ from qwenpaw.app.routers.research_scope import (
     approved_plan_paths,
     build_plan_revision_proposal,
     frozen_plan_paths,
+    install_research_scope_policy,
     parse_research_plan_scope,
 )
 
@@ -136,3 +137,53 @@ def test_revision_proposal_migrates_legacy_plan_to_structured_scope() -> None:
     assert "## Modifiable Files" in proposal
     assert "- `src/fix.py`" in proposal
     assert "- `tests/unit/test_fix.py`" in proposal
+
+
+def test_install_policy_rejects_invalid_scope_as_incompatible() -> None:
+    research_module = ModuleType("research_for_scope_test")
+
+    def compatibility(
+        _plan: str,
+        *,
+        host_platform: str | None = None,
+        host_machine: str | None = None,
+    ) -> tuple[str, str, str]:
+        del host_platform, host_machine
+        return "compatible", "macOS (arm64)", "environment is compatible"
+
+    research_module._plan_environment_compatibility = compatibility
+    install_research_scope_policy(research_module)
+
+    status, environment, reason = research_module._plan_environment_compatibility(
+        "# Plan\n\n## Modifiable Files\n- `../escape.py`\n",
+    )
+
+    assert status == "incompatible"
+    assert environment == "macOS (arm64)"
+    assert "计划文件范围无效" in reason
+
+
+def test_install_policy_keeps_valid_environment_result() -> None:
+    research_module = ModuleType("research_for_scope_test")
+
+    def compatibility(
+        _plan: str,
+        *,
+        host_platform: str | None = None,
+        host_machine: str | None = None,
+    ) -> tuple[str, str, str]:
+        del host_platform, host_machine
+        return "unknown", "Linux (x86_64)", "manual review required"
+
+    research_module._plan_environment_compatibility = compatibility
+    install_research_scope_policy(research_module)
+
+    result = research_module._plan_environment_compatibility(
+        "# Plan\n\n## Modifiable Files\n- `src/fix.py`\n",
+    )
+
+    assert result == (
+        "unknown",
+        "Linux (x86_64)",
+        "manual review required",
+    )
