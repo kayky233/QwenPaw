@@ -61,6 +61,11 @@ def test_explicit_task_type_declaration_wins(
         ("Refactor the repository service", ResearchTaskType.REFACTOR),
         ("Reduce request latency benchmark", ResearchTaskType.PERFORMANCE),
         ("Compare three cache policies", ResearchTaskType.RESEARCH),
+        ("修复流式解析崩溃问题", ResearchTaskType.BUG_FIX),
+        ("新增 Memory TTL 功能", ResearchTaskType.FEATURE),
+        ("重构仓储服务并解耦模块", ResearchTaskType.REFACTOR),
+        ("优化请求延迟和吞吐", ResearchTaskType.PERFORMANCE),
+        ("调研并对比三种缓存策略", ResearchTaskType.RESEARCH),
     ],
 )
 def test_task_type_inference_covers_supported_categories(
@@ -70,9 +75,25 @@ def test_task_type_inference_covers_supported_categories(
     task_type, source, confidence, rationale = infer_task_type(goal)
 
     assert task_type is expected
-    assert source == "inferred_text"
-    assert confidence == 0.8
+    assert source == "inferred_multilingual_text"
+    assert confidence == 0.85
     assert expected.value in rationale
+
+
+def test_fix_action_wins_over_investigation_wording() -> None:
+    task_type, _, _, _ = infer_task_type(
+        "Investigate and fix the stream parser crash",
+    )
+
+    assert task_type is ResearchTaskType.BUG_FIX
+
+
+def test_feature_action_wins_over_research_wording() -> None:
+    task_type, _, _, _ = infer_task_type(
+        "调研并实现多 Agent 协作功能",
+    )
+
+    assert task_type is ResearchTaskType.FEATURE
 
 
 def test_issue_only_goal_keeps_legacy_bug_fix_contract() -> None:
@@ -191,5 +212,6 @@ def test_real_router_exposes_task_spec_service() -> None:
 
     assert research_module.ResearchTaskType is ResearchTaskType
     assert research_module.TaskSpec is TaskSpec
+    assert research_module._task_spec_inference_installed is True
     assert research_module._task_spec_runtime_installed is True
     assert research_module._build_task_spec is build_task_spec
