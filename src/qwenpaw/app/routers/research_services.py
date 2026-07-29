@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import ModuleType
 
 from .research_campaign_service import install_research_campaign_service
+from .research_campaign_workspace_service import (
+    install_research_campaign_workspace_service,
+)
 from .research_delivery_lifecycle_service import (
     install_research_delivery_lifecycle_service,
 )
@@ -63,3 +66,4 @@ def install_research_services(research_module: ModuleType) -> None:
     install_research_delivery_lifecycle_service(research_module)
     install_research_delivery_monitor_service(research_module)
     install_research_campaign_service(research_module)
+    install_research_campaign_workspace_service(research_module)
