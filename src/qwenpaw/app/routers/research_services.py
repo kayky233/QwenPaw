@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from types import ModuleType
 
+from .research_delivery_lifecycle_service import (
+    install_research_delivery_lifecycle_service,
+)
 from .research_delivery_service import install_research_delivery_service
 from .research_dialog_persistence import (
     install_research_dialog_persistence,
@@ -53,3 +56,4 @@ def install_research_services(research_module: ModuleType) -> None:
     install_research_task_spec_runtime(research_module)
     install_research_task_spec_api(research_module)
     install_research_step_runtime_service(research_module)
+    install_research_delivery_lifecycle_service(research_module)
