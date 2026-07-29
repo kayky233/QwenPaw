@@ -35,20 +35,11 @@ from .provider_oauth import router as provider_oauth_router
 from .pawapps import router as pawapps_router
 from . import research as research_module
 from .research import router as research_router
-from .research_dialog_service import install_research_dialog_service
-from .research_github_service import install_research_github_service
-from .research_scope import install_research_scope_policy
-from .research_state_machine import install_research_state_machine
-from .research_validation_service import install_research_validation_service
+from .research_services import install_research_services
 
-# Keep the public research router API stable while moving security-sensitive
-# scope parsing, dialog state helpers, GitHub helpers, validation helpers, and
-# lifecycle rules into small, independently testable modules.
-install_research_scope_policy(research_module)
-install_research_state_machine(research_module)
-install_research_dialog_service(research_module)
-install_research_github_service(research_module)
-install_research_validation_service(research_module)
+# Keep the public research router API stable while extracted services gradually
+# take ownership of scope, lifecycle, dialog, GitHub, and validation behavior.
+install_research_services(research_module)
 
 router = APIRouter()
 
