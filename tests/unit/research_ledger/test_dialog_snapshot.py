@@ -1,4 +1,4 @@
-from copy import deepcopy
+from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import func, select
@@ -14,7 +14,7 @@ from qwenpaw.research_ledger.schema import Base
 
 
 @pytest.fixture
-async def snapshot_engine() -> AsyncEngine:
+async def snapshot_engine() -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -40,6 +40,28 @@ def _state(**overrides):
     }
     state.update(overrides)
     return state
+
+
+def _copy_snapshot(
+    snapshot: ResearchDialogSnapshot,
+    **overrides,
+) -> ResearchDialogSnapshot:
+    values = {
+        "plan_id": snapshot.plan_id,
+        "schema_version": snapshot.schema_version,
+        "status": snapshot.status,
+        "revision": snapshot.revision,
+        "content_hash": snapshot.content_hash,
+        "state_hash": snapshot.state_hash,
+        "owner_agent_id": snapshot.owner_agent_id,
+        "owner_user_id": snapshot.owner_user_id,
+        "owner_session_id": snapshot.owner_session_id,
+        "state_json": snapshot.state_json,
+        "created_at": snapshot.created_at,
+        "updated_at": snapshot.updated_at,
+    }
+    values.update(overrides)
+    return ResearchDialogSnapshot(**values)
 
 
 def test_dialog_snapshot_table_is_registered_with_ledger_metadata() -> None:
@@ -158,10 +180,12 @@ async def test_snapshot_integrity_check_detects_tampering(
 ) -> None:
     store = ResearchDialogSnapshotStore(snapshot_engine)
     snapshot = await store.upsert(_state())
-    tampered = deepcopy(snapshot)
-    tampered.state_json = tampered.state_json.replace(
-        "awaiting_approval",
-        "approved",
+    tampered = _copy_snapshot(
+        snapshot,
+        state_json=snapshot.state_json.replace(
+            "awaiting_approval",
+            "approved",
+        ),
     )
 
     with pytest.raises(RuntimeError, match="hash mismatch"):
@@ -186,6 +210,25 @@ def test_snapshot_decode_rejects_plan_id_mismatch() -> None:
     )
 
     with pytest.raises(RuntimeError, match="plan_id mismatch"):
+        decode_dialog_state(snapshot)
+
+
+def test_snapshot_decode_rejects_unknown_schema_version() -> None:
+    encoded, digest = encode_dialog_state(_state())
+    snapshot = ResearchDialogSnapshot(
+        plan_id="plan-snapshot-1",
+        schema_version=99,
+        status="awaiting_approval",
+        revision=1,
+        content_hash="",
+        state_hash=digest,
+        owner_agent_id="default",
+        owner_user_id=None,
+        owner_session_id=None,
+        state_json=encoded,
+    )
+
+    with pytest.raises(RuntimeError, match="schema version"):
         decode_dialog_state(snapshot)
 
 
