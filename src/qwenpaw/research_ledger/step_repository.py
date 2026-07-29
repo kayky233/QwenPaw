@@ -49,7 +49,10 @@ class ResearchArtifactRepository:
     def __init__(self) -> None:
         self._artifacts: dict[str, ResearchArtifactContract] = {}
 
-    def add(self, artifact: ResearchArtifactContract) -> ResearchArtifactContract:
+    def add(
+        self,
+        artifact: ResearchArtifactContract,
+    ) -> ResearchArtifactContract:
         self._artifacts[artifact.artifact_id] = artifact
         return artifact
 
@@ -57,10 +60,24 @@ class ResearchArtifactRepository:
         return self._artifacts.get(artifact_id)
 
     def list_for_step(self, step_id: str) -> list[ResearchArtifactContract]:
-        return [
-            item for item in self._artifacts.values()
-            if item.step_id == step_id
-        ]
+        return sorted(
+            (
+                item
+                for item in self._artifacts.values()
+                if item.step_id == step_id
+            ),
+            key=lambda item: item.artifact_id,
+        )
+
+    def list_for_run(self, run_id: str) -> list[ResearchArtifactContract]:
+        return sorted(
+            (
+                item
+                for item in self._artifacts.values()
+                if item.run_id == run_id
+            ),
+            key=lambda item: (item.step_id, item.artifact_id),
+        )
 
     def has_verified_type(
         self,
@@ -74,6 +91,18 @@ class ResearchArtifactRepository:
             for item in self._artifacts.values()
         )
 
+    def has_verified_type_for_run(
+        self,
+        run_id: str,
+        artifact_type: ResearchArtifactType,
+    ) -> bool:
+        return any(
+            item.run_id == run_id
+            and item.artifact_type == artifact_type
+            and item.verified
+            for item in self._artifacts.values()
+        )
+
     def all_verified(
         self,
         step_id: str,
@@ -81,5 +110,15 @@ class ResearchArtifactRepository:
     ) -> bool:
         return all(
             self.has_verified_type(step_id, artifact_type)
+            for artifact_type in required
+        )
+
+    def all_verified_for_run(
+        self,
+        run_id: str,
+        required: Iterable[ResearchArtifactType],
+    ) -> bool:
+        return all(
+            self.has_verified_type_for_run(run_id, artifact_type)
             for artifact_type in required
         )
