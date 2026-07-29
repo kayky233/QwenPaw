@@ -29,6 +29,9 @@ interface ResearchStore {
   updatePlan: (plan: ResearchDialogState) => void;
   refreshPlan: (planId: string) => Promise<ResearchDialogState>;
   savePlan: (planId: string, planMarkdown: string) => Promise<void>;
+  proposePlanRevision: (planId: string, instruction?: string) => Promise<void>;
+  acceptPlanRevision: (planId: string) => Promise<void>;
+  rejectPlanRevision: (planId: string) => Promise<void>;
   approvePlan: (planId: string) => Promise<void>;
   rejectPlan: (planId: string, reason: string) => Promise<void>;
   openRun: (runId: string) => Promise<void>;
@@ -51,7 +54,13 @@ async function watchPlan(planId: string): Promise<void> {
       if (controller.signal.aborted) return;
       const plan = await useResearchStore.getState().refreshPlan(planId);
       if (
-        ["completed", "failed", "cancelled", "rejected"].includes(plan.status)
+        [
+          "completed",
+          "failed",
+          "cancelled",
+          "rejected",
+          "needs_revision",
+        ].includes(plan.status)
       ) {
         return;
       }
@@ -265,11 +274,28 @@ export const useResearchStore = create<ResearchStore>()(
               rejected_by: null,
               rejected_at: null,
               rejection_reason: "",
+              upstream_repository: "",
+              push_repository: "",
               worktree_path: "",
               branch: "",
               commit_sha: "",
               pr_url: "",
               test_summary: "",
+              reproduction_status: "pending",
+              reproduction_summary: "",
+              verification_status: "pending",
+              verification_summary: "",
+              validation_report: "",
+              changed_paths: [],
+              unapproved_paths: [],
+              validation_failure_category: "",
+              validation_attempts: [],
+              revision_proposal: "",
+              revision_proposal_reason: "",
+              revision_proposal_revision: null,
+              current_environment: "",
+              environment_compatibility: "unknown",
+              environment_compatibility_reason: "",
               error: "",
               events: [],
               created_at: now,
@@ -299,6 +325,46 @@ export const useResearchStore = create<ResearchStore>()(
         }
         const updated = await api.editDialogPlan(planId, {
           plan_markdown: planMarkdown,
+          expected_revision: current.revision,
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: updated },
+        }));
+      },
+
+      proposePlanRevision: async (planId, instruction = "") => {
+        const current = get().plans[planId];
+        if (!current || current.revision < 1) {
+          throw new Error("Research plan is not ready for revision");
+        }
+        const updated = await api.proposeDialogPlanRevision(planId, {
+          instruction,
+          expected_revision: current.revision,
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: updated },
+        }));
+      },
+
+      acceptPlanRevision: async (planId) => {
+        const current = get().plans[planId];
+        if (!current || current.revision < 1) {
+          throw new Error("Research plan has no revision proposal");
+        }
+        const updated = await api.acceptDialogPlanRevision(planId, {
+          expected_revision: current.revision,
+        });
+        set((state) => ({
+          plans: { ...state.plans, [planId]: updated },
+        }));
+      },
+
+      rejectPlanRevision: async (planId) => {
+        const current = get().plans[planId];
+        if (!current || current.revision < 1) {
+          throw new Error("Research plan has no revision proposal");
+        }
+        const updated = await api.rejectDialogPlanRevision(planId, {
           expected_revision: current.revision,
         });
         set((state) => ({
@@ -373,6 +439,7 @@ export const useResearchStore = create<ResearchStore>()(
       name: "qwenpaw-active-research",
       partialize: (state) => ({
         activeRunId: state.activeRunId,
+        activePlanId: state.activePlanId,
         panelOpen: state.panelOpen,
       }),
     },

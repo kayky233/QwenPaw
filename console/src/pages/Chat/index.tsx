@@ -135,6 +135,7 @@ import {
 import ResearchSidePanel from "../../features/research/ResearchSidePanel";
 import { ResearchChatBridge } from "../../features/research/ResearchChatBridge";
 import {
+  isResearchPlanTerminal,
   parseResearchCommand,
   type ResearchCommand,
 } from "../../features/research/researchCommands";
@@ -1422,8 +1423,42 @@ export default function ChatPage() {
       const store = useResearchStore.getState();
       if (command.action === "help") {
         message.info(
-          "/research <目标> · /research status · /research open · /research stop",
+          "/research <目标> · revise <要求> · accept · reject · status · open · stop",
         );
+        return;
+      }
+      if (
+        command.action === "revise" ||
+        command.action === "accept_revision" ||
+        command.action === "reject_revision"
+      ) {
+        if (!store.activePlanId) {
+          message.info("当前没有可修改的 AutoResearch 计划");
+          return;
+        }
+        try {
+          if (command.action === "revise") {
+            await store.proposePlanRevision(
+              store.activePlanId,
+              command.instruction,
+            );
+            useResearchStore.setState({ panelOpen: true });
+            message.success("已生成计划修订建议，请接受或拒绝");
+            return;
+          }
+          if (command.action === "accept_revision") {
+            await store.acceptPlanRevision(store.activePlanId);
+            useResearchStore.setState({ panelOpen: true });
+            message.success("已接受修订，计划仍需批准执行");
+            return;
+          }
+          await store.rejectPlanRevision(store.activePlanId);
+          message.info("已拒绝修订建议，原计划保持不变");
+        } catch (error) {
+          message.error(
+            error instanceof Error ? error.message : "计划修订操作失败",
+          );
+        }
         return;
       }
       if (command.action === "status") {
@@ -1483,10 +1518,7 @@ export default function ChatPage() {
       const currentPlan = store.activePlanId
         ? store.plans[store.activePlanId]
         : undefined;
-      if (
-        currentPlan &&
-        !["completed", "failed", "cancelled"].includes(currentPlan.status)
-      ) {
+      if (currentPlan && !isResearchPlanTerminal(currentPlan.status)) {
         useResearchStore.setState({ panelOpen: true });
         message.warning("已有研究规划正在运行，已重新打开右侧面板");
         return;
@@ -1509,6 +1541,10 @@ export default function ChatPage() {
           useResearchStore.getState().updatePlan(status);
           if (status.status === "awaiting_approval") {
             message.success("研究方案已生成，请审批后再执行");
+            return;
+          }
+          if (status.status === "needs_revision") {
+            message.warning(status.error || "验证结果已保留，请修订计划后继续");
             return;
           }
           if (status.status === "completed" && status.run_id) {

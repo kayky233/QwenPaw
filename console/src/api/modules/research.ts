@@ -102,11 +102,40 @@ export interface ResearchDialogState {
   rejected_by: string | null;
   rejected_at: string | null;
   rejection_reason: string;
+  upstream_repository?: string;
+  push_repository?: string;
   worktree_path: string;
   branch: string;
   commit_sha: string;
   pr_url: string;
   test_summary: string;
+  reproduction_status: string;
+  reproduction_summary: string;
+  verification_status: string;
+  verification_summary: string;
+  validation_report: string;
+  changed_paths: string[];
+  unapproved_paths: string[];
+  validation_failure_category: string;
+  validation_attempts: Array<{
+    attempt: number;
+    revision: number;
+    timestamp: string;
+    failure_category: string;
+    changed_paths: string[];
+    unapproved_paths: string[];
+    reproduction_status: string;
+    reproduction_summary: string;
+    verification_status: string;
+    verification_summary: string;
+    validation_report: string;
+  }>;
+  revision_proposal: string;
+  revision_proposal_reason: string;
+  revision_proposal_revision: number | null;
+  current_environment: string;
+  environment_compatibility: "compatible" | "incompatible" | "unknown";
+  environment_compatibility_reason: string;
   error: string;
   events: Array<{ phase: string; detail: string; timestamp: string }>;
   created_at: string;
@@ -176,6 +205,42 @@ export const researchApi = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+
+  proposeDialogPlanRevision: (
+    planId: string,
+    body: { instruction: string; expected_revision: number },
+  ) =>
+    request<ResearchDialogState>(
+      `/research/dialog/${planId}/revision-proposal`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+
+  acceptDialogPlanRevision: (
+    planId: string,
+    body: { expected_revision: number },
+  ) =>
+    request<ResearchDialogState>(
+      `/research/dialog/${planId}/revision-proposal/accept`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
+
+  rejectDialogPlanRevision: (
+    planId: string,
+    body: { expected_revision: number },
+  ) =>
+    request<ResearchDialogState>(
+      `/research/dialog/${planId}/revision-proposal/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
 
   approveDialogPlan: (
     planId: string,
