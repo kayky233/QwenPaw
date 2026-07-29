@@ -209,6 +209,7 @@ def install_research_dialog_persistence(
         if store is None:
             return
         snapshots = await store.list_recent(limit=500)
+        restored_dialogs: list[Any] = []
         research_module._dialog_snapshot_restoring = True
         dialog_store = research_module._dialog_runs
         if isinstance(dialog_store, PersistingDialogStore):
@@ -230,6 +231,7 @@ def install_research_dialog_persistence(
                     )
                     continue
                 dialog_store[snapshot.plan_id] = dialog
+                restored_dialogs.append(dialog)
                 if runtime_context:
                     research_module._dialog_runtime_context[
                         snapshot.plan_id
@@ -238,6 +240,10 @@ def install_research_dialog_persistence(
             if isinstance(dialog_store, PersistingDialogStore):
                 dialog_store.suppress_snapshots(False)
             research_module._dialog_snapshot_restoring = False
+
+        for dialog in restored_dialogs:
+            queue_snapshot(dialog)
+        await flush_snapshots()
 
     current_store = research_module._dialog_runs
     if isinstance(current_store, PersistingDialogStore):
@@ -265,9 +271,13 @@ def install_research_dialog_persistence(
         repository = research_module._ledger_repository
         if repository is None:
             return
-        engine = repository._get_engine()
+        engine_getter = getattr(repository, "_get_engine", None)
+        if not callable(engine_getter):
+            raise RuntimeError(
+                "Research Ledger repository does not expose its engine",
+            )
         research_module._dialog_snapshot_store = (
-            ResearchDialogSnapshotStore(engine)
+            ResearchDialogSnapshotStore(engine_getter())
         )
         await restore_snapshots()
 
@@ -279,6 +289,7 @@ def install_research_dialog_persistence(
         await flush_snapshots()
         research_module._dialog_snapshot_store = None
         await base_close()
+        research_module._dialog_runs.clear()
         research_module._dialog_snapshot_errors.clear()
 
     research_module._dialog_snapshot_payload = dialog_snapshot_payload
