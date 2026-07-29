@@ -233,7 +233,38 @@ def build_plan_revision_proposal(
 def install_research_scope_policy(research_module: ModuleType) -> None:
     """Install the extracted policy into the existing research router module."""
 
+    if not hasattr(research_module, "_base_plan_environment_compatibility"):
+        research_module._base_plan_environment_compatibility = (
+            research_module._plan_environment_compatibility
+        )
+
+    base_compatibility = research_module._base_plan_environment_compatibility
+
+    def checked_plan_environment_compatibility(
+        plan_markdown: str,
+        *,
+        host_platform: str | None = None,
+        host_machine: str | None = None,
+    ) -> tuple[str, str, str]:
+        status, current_environment, reason = base_compatibility(
+            plan_markdown,
+            host_platform=host_platform,
+            host_machine=host_machine,
+        )
+        try:
+            parse_research_plan_scope(plan_markdown)
+        except ResearchPlanScopeError as exc:
+            return (
+                "incompatible",
+                current_environment,
+                f"计划文件范围无效，不能批准或执行：{exc}",
+            )
+        return status, current_environment, reason
+
     research_module._parse_research_plan_scope = parse_research_plan_scope
     research_module._approved_plan_paths = approved_plan_paths
     research_module._frozen_plan_paths = frozen_plan_paths
     research_module._build_plan_revision_proposal = build_plan_revision_proposal
+    research_module._plan_environment_compatibility = (
+        checked_plan_environment_compatibility
+    )
