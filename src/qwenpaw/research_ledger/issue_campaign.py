@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Protocol
 
+from .campaign_delivery_contract import CampaignDeliveryReceipt
 from .candidate_checkpoint import CandidateCheckpoint
 from .change_request_delivery import ChangeRequestResult
 from .collaboration_contracts import ReviewDecision, ReviewVerdict
@@ -44,6 +45,7 @@ class IssueCampaignRequest:
     frozen_files: tuple[str, ...] = ()
     environment: dict[str, str] | None = None
     max_attempts: int = 3
+    modifiable_files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class IssueCampaignOutcome:
     artifacts: tuple[ResearchArtifactContract, ...]
     evidence: EpisodeEvidenceResult | None = None
     delivery: ChangeRequestResult | None = None
+    delivery_receipt: CampaignDeliveryReceipt | None = None
     reason: str = ""
 
 
@@ -103,11 +106,11 @@ class CampaignDeliverer(Protocol):
         episode: EpisodePackage,
         candidate: CampaignCandidate,
         artifacts: tuple[ResearchArtifactContract, ...],
-    ) -> ChangeRequestResult: ...
+    ) -> CampaignDeliveryReceipt: ...
 
 
 class IssueCampaignRunner:
-    """Run a bounded issue-solving campaign with evidence-gated delivery."""
+    """Run a bounded issue-solving campaign with two evidence gates."""
 
     def __init__(
         self,
@@ -148,6 +151,7 @@ class IssueCampaignRunner:
             commands=request.commands,
             frozen_files=request.frozen_files,
             environment=request.environment,
+            modifiable_files=request.modifiable_files,
         )
         validation_plan = self.validation_planner.compile(
             episode,
@@ -206,24 +210,17 @@ class IssueCampaignRunner:
             validation_artifacts = tuple(
                 stage.artifact for stage in validation.stages
             )
-            verified_checkpoint = replace(
-                candidate.checkpoint,
-                verification_passed=validation.succeeded,
-            )
             candidate = replace(
                 candidate,
-                checkpoint=verified_checkpoint,
-            )
-            commit_artifact = self._commit_artifact(
-                episode,
-                candidate,
-                verified=validation.succeeded,
+                checkpoint=replace(
+                    candidate.checkpoint,
+                    verification_passed=validation.succeeded,
+                ),
             )
             pre_review_artifacts = (
                 plan_artifact,
                 *candidate.artifacts,
                 *validation_artifacts,
-                commit_artifact,
             )
 
             try:
@@ -280,26 +277,29 @@ class IssueCampaignRunner:
                 )
 
             if validation.succeeded and review.decision.approved:
-                evidence = self.evidence_gate.evaluate(
+                pre_evidence = self.evidence_gate.evaluate(
                     episode,
                     combined_artifacts,
+                    required_types=self._pre_delivery_types(episode),
                 )
-                if not evidence.ready:
+                if not pre_evidence.ready:
                     return self._outcome(
                         IssueCampaignStatus.BLOCKED,
                         prepared,
                         episode,
                         attempts,
                         combined_artifacts,
-                        evidence=evidence,
-                        reason="episode_evidence_gate_failed",
+                        evidence=pre_evidence,
+                        reason="pre_delivery_evidence_gate_failed",
                     )
+
                 try:
-                    delivery = await deliverer.deliver(
+                    receipt = await deliverer.deliver(
                         episode,
                         candidate,
                         combined_artifacts,
                     )
+                    receipt.validate(episode.run_id)
                 except Exception as exc:
                     return self._outcome(
                         IssueCampaignStatus.FAILED,
@@ -307,22 +307,42 @@ class IssueCampaignRunner:
                         episode,
                         attempts,
                         combined_artifacts,
-                        evidence=evidence,
+                        evidence=pre_evidence,
                         reason=f"delivery_failed:{type(exc).__name__}:{exc}",
                     )
-                pr_artifact = self._delivery_artifact(
-                    episode,
-                    delivery,
+
+                final_artifacts = self._merge_artifacts(
+                    combined_artifacts,
+                    receipt.artifacts,
                 )
+                post_evidence = self.evidence_gate.evaluate(
+                    episode,
+                    final_artifacts,
+                    required_types=self._post_delivery_types(episode),
+                )
+                if not post_evidence.ready:
+                    return self._outcome(
+                        IssueCampaignStatus.BLOCKED,
+                        prepared,
+                        episode,
+                        attempts,
+                        final_artifacts,
+                        evidence=post_evidence,
+                        delivery=receipt.change_request,
+                        delivery_receipt=receipt,
+                        reason="post_delivery_evidence_gate_failed",
+                    )
+
                 return self._outcome(
                     IssueCampaignStatus.DELIVERED,
                     prepared,
                     episode,
                     attempts,
-                    (*combined_artifacts, pr_artifact),
-                    evidence=evidence,
-                    delivery=delivery,
-                    reason="verified_and_delivered",
+                    final_artifacts,
+                    evidence=post_evidence,
+                    delivery=receipt.change_request,
+                    delivery_receipt=receipt,
+                    reason="verified_committed_and_delivered",
                 )
 
             feedback = self._feedback(validation, review, failure)
@@ -338,6 +358,43 @@ class IssueCampaignRunner:
         )
 
     @staticmethod
+    def _pre_delivery_types(
+        episode: EpisodePackage,
+    ) -> set[ResearchArtifactType]:
+        required = {
+            item.artifact_type
+            for item in episode.expected_artifacts
+            if item.required
+        }
+        return required - {
+            ResearchArtifactType.COMMIT,
+            ResearchArtifactType.PULL_REQUEST,
+        }
+
+    @staticmethod
+    def _post_delivery_types(
+        episode: EpisodePackage,
+    ) -> set[ResearchArtifactType]:
+        required = {
+            item.artifact_type
+            for item in episode.expected_artifacts
+            if item.required
+        }
+        return required | {ResearchArtifactType.PULL_REQUEST}
+
+    @staticmethod
+    def _merge_artifacts(
+        current: tuple[ResearchArtifactContract, ...],
+        delivered: tuple[ResearchArtifactContract, ...],
+    ) -> tuple[ResearchArtifactContract, ...]:
+        merged: dict[str, ResearchArtifactContract] = {
+            artifact.artifact_id: artifact for artifact in current
+        }
+        for artifact in delivered:
+            merged[artifact.artifact_id] = artifact
+        return tuple(merged.values())
+
+    @staticmethod
     def _outcome(
         status: IssueCampaignStatus,
         prepared: PreparedIssueSolve,
@@ -347,6 +404,7 @@ class IssueCampaignRunner:
         *,
         evidence: EpisodeEvidenceResult | None = None,
         delivery: ChangeRequestResult | None = None,
+        delivery_receipt: CampaignDeliveryReceipt | None = None,
         reason: str,
     ) -> IssueCampaignOutcome:
         return IssueCampaignOutcome(
@@ -357,6 +415,7 @@ class IssueCampaignRunner:
             artifacts=artifacts,
             evidence=evidence,
             delivery=delivery,
+            delivery_receipt=delivery_receipt,
             reason=reason,
         )
 
@@ -372,46 +431,6 @@ class IssueCampaignRunner:
             content_hash=ResearchArtifactContract.hash_content(content),
             verified=True,
             metadata={"episode_digest": episode.digest()},
-        )
-
-    @staticmethod
-    def _commit_artifact(
-        episode: EpisodePackage,
-        candidate: CampaignCandidate,
-        *,
-        verified: bool,
-    ) -> ResearchArtifactContract:
-        revision = candidate.checkpoint.tree_revision
-        return ResearchArtifactContract(
-            artifact_id=f"{candidate.checkpoint.candidate_id}-commit",
-            run_id=episode.run_id,
-            step_id=f"{episode.run_id}-delivery",
-            artifact_type=ResearchArtifactType.COMMIT,
-            path=f"git://{revision}",
-            content_hash=ResearchArtifactContract.hash_content(revision),
-            verified=verified and bool(revision),
-            metadata={
-                "candidate_id": candidate.checkpoint.candidate_id,
-                "parent_revision": candidate.checkpoint.parent_revision,
-                "tree_revision": revision,
-                "risk_score": candidate.checkpoint.risk_score,
-            },
-        )
-
-    @staticmethod
-    def _delivery_artifact(
-        episode: EpisodePackage,
-        delivery: ChangeRequestResult,
-    ) -> ResearchArtifactContract:
-        return ResearchArtifactContract(
-            artifact_id=f"{episode.episode_id}-pull-request",
-            run_id=episode.run_id,
-            step_id=f"{episode.run_id}-delivery",
-            artifact_type=ResearchArtifactType.PULL_REQUEST,
-            path=delivery.url,
-            content_hash=ResearchArtifactContract.hash_content(delivery.url),
-            verified=bool(delivery.url),
-            metadata={"number": delivery.number},
         )
 
     @staticmethod
@@ -433,14 +452,22 @@ class IssueCampaignRunner:
             return "candidate_diff_hash_invalid"
         if not candidate.artifacts:
             return "candidate_artifacts_missing"
-        has_diff = False
+
+        diff_artifacts = tuple(
+            artifact
+            for artifact in candidate.artifacts
+            if artifact.artifact_type == ResearchArtifactType.CODE_DIFF
+        )
+        if not diff_artifacts:
+            return "candidate_code_diff_missing"
         for artifact in candidate.artifacts:
             if artifact.run_id != episode.run_id:
                 return f"candidate_artifact_run_mismatch:{artifact.artifact_id}"
-            if artifact.artifact_type == ResearchArtifactType.CODE_DIFF:
-                has_diff = True
-        if not has_diff:
-            return "candidate_code_diff_missing"
+        for artifact in diff_artifacts:
+            if not artifact.verified:
+                return f"candidate_code_diff_not_verified:{artifact.artifact_id}"
+            if artifact.content_hash != checkpoint.diff_hash:
+                return f"candidate_diff_hash_mismatch:{artifact.artifact_id}"
         return ""
 
     @staticmethod
