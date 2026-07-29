@@ -1,4 +1,4 @@
-"""Evidence-gated pull request delivery contracts."""
+"""Evidence-gated pull request and merge request delivery contracts."""
 
 from __future__ import annotations
 
@@ -45,15 +45,44 @@ class EvidenceGatedDelivery:
         self.artifacts = artifacts
         self.provider = provider
 
-    def create(self, step_id: str, request: ChangeRequest) -> ChangeRequestResult:
+    @staticmethod
+    def _missing_message(missing: tuple[str, ...]) -> RuntimeError:
+        return RuntimeError(
+            "change request blocked; missing verified artifacts: "
+            + ", ".join(missing)
+        )
+
+    def create(
+        self,
+        step_id: str,
+        request: ChangeRequest,
+    ) -> ChangeRequestResult:
+        """Create using legacy same-step evidence semantics."""
+
         missing = tuple(
             artifact_type.value
             for artifact_type in self.REQUIRED
             if not self.artifacts.has_verified_type(step_id, artifact_type)
         )
         if missing:
-            raise RuntimeError(
-                "change request blocked; missing verified artifacts: "
-                + ", ".join(missing)
+            raise self._missing_message(missing)
+        return self.provider.create(request)
+
+    def create_for_run(
+        self,
+        run_id: str,
+        request: ChangeRequest,
+    ) -> ChangeRequestResult:
+        """Create when verified evidence is distributed across run steps."""
+
+        missing = tuple(
+            artifact_type.value
+            for artifact_type in self.REQUIRED
+            if not self.artifacts.has_verified_type_for_run(
+                run_id,
+                artifact_type,
             )
+        )
+        if missing:
+            raise self._missing_message(missing)
         return self.provider.create(request)
