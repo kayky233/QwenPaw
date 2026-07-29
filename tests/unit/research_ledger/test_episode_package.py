@@ -8,6 +8,7 @@ from qwenpaw.research_ledger.episode_package import (
     EpisodeExpectedArtifact,
     EpisodePackage,
 )
+from qwenpaw.research_ledger.impact_analysis import ImpactSet
 from qwenpaw.research_ledger.issue_context_planner import ContextualIssueSolvePlan
 from qwenpaw.research_ledger.issue_fetcher import IssueEvidence
 from qwenpaw.research_ledger.issue_solver import IssueSolvePlan, IssueTask
@@ -99,10 +100,11 @@ def _prepared_issue(paths=("src/qwenpaw/memory/cache.py",)):
         title="Fix cache expiry",
         description="expired cache entries remain visible",
     )
+    test_paths = ("tests/unit/test_cache.py",) if paths else ()
     context = RepositoryContextPack(
         items=(),
         affected_paths=paths,
-        test_paths=("tests/unit/test_cache.py",) if paths else (),
+        test_paths=test_paths,
         estimated_tokens=25,
         truncated=False,
         graph_available=bool(paths),
@@ -124,6 +126,13 @@ def _prepared_issue(paths=("src/qwenpaw/memory/cache.py",)):
             downgrade_reason=None if paths else "no_matches",
         ),
         context_pack=context,
+        impact_set=ImpactSet(
+            source_paths=paths,
+            test_paths=test_paths,
+            symbols=(),
+            reasons=("anchor:cache",),
+        ),
+        selected_tests=(),
     )
     return PreparedIssueSolve(
         evidence=IssueEvidence(
