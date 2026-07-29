@@ -66,3 +66,5 @@ def test_issue_planner_includes_repository_context():
         )
     )
     assert result.context_pack.affected_paths == ("src/memory/cache.py",)
+    assert result.impact_set.source_paths == ("src/memory/cache.py",)
+    assert result.selected_tests[0].path == "tests/memory/test_cache.py"
