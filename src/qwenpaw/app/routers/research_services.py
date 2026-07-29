@@ -13,6 +13,12 @@ from .research_github_service import install_research_github_service
 from .research_planning_service import install_research_planning_service
 from .research_scope import install_research_scope_policy
 from .research_state_machine import install_research_state_machine
+from .research_step_runtime_persistence import (
+    enable_execution_ledger_snapshot_persistence,
+)
+from .research_step_runtime_service import (
+    install_research_step_runtime_service,
+)
 from .research_task_spec import install_research_task_spec
 from .research_task_spec_api import install_research_task_spec_api
 from .research_task_spec_inference import (
@@ -40,8 +46,10 @@ def install_research_services(research_module: ModuleType) -> None:
     install_research_validation_pipeline(research_module)
     install_research_worktree_service(research_module)
     install_research_delivery_service(research_module)
+    enable_execution_ledger_snapshot_persistence()
     install_research_dialog_persistence(research_module)
     install_research_task_spec(research_module)
     install_research_task_spec_inference(research_module)
     install_research_task_spec_runtime(research_module)
     install_research_task_spec_api(research_module)
+    install_research_step_runtime_service(research_module)
