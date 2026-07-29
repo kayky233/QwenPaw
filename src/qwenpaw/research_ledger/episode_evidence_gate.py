@@ -21,6 +21,8 @@ class EpisodeEvidenceGate:
         self,
         episode: EpisodePackage,
         artifacts: tuple[ResearchArtifactContract, ...],
+        *,
+        required_types: set[ResearchArtifactType] | None = None,
     ) -> EpisodeEvidenceResult:
         episode.validate()
         invalid: list[str] = []
@@ -30,9 +32,7 @@ class EpisodeEvidenceGate:
 
         for artifact in artifacts:
             if artifact.run_id != episode.run_id:
-                invalid.append(
-                    f"{artifact.artifact_id}:run_id_mismatch"
-                )
+                invalid.append(f"{artifact.artifact_id}:run_id_mismatch")
                 continue
             if artifact.verified:
                 verified_types.add(artifact.artifact_type)
@@ -49,14 +49,21 @@ class EpisodeEvidenceGate:
                 if normalized not in allowed_paths:
                     scope_violations.add(normalized)
 
-        required_types = {
-            item.artifact_type
-            for item in episode.expected_artifacts
-            if item.required
-        }
+        required = (
+            set(required_types)
+            if required_types is not None
+            else {
+                item.artifact_type
+                for item in episode.expected_artifacts
+                if item.required
+            }
+        )
         missing = tuple(
             item.value
-            for item in sorted(required_types - verified_types, key=lambda value: value.value)
+            for item in sorted(
+                required - verified_types,
+                key=lambda value: value.value,
+            )
         )
         violations = tuple(sorted(scope_violations))
         invalid_items = tuple(dict.fromkeys(invalid))
