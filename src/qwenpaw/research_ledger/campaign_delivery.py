@@ -1,36 +1,49 @@
-"""Evidence-gated change-request delivery for completed Issue Campaigns."""
+"""Two-stage, evidence-gated delivery for completed Issue Campaigns."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
+from .campaign_delivery_contract import (
+    CampaignDeliveryReceipt,
+    CampaignPublication,
+    CampaignPublisher,
+)
 from .change_request_delivery import (
     ChangeRequest,
     ChangeRequestProvider,
-    ChangeRequestResult,
     EvidenceGatedDelivery,
 )
-from .contracts import ResearchArtifactContract
+from .contracts import ResearchArtifactContract, ResearchArtifactType
 from .episode_package import EpisodePackage
-from .issue_campaign import CampaignCandidate
 from .step_repository import ResearchArtifactRepository
+
+if TYPE_CHECKING:
+    from .issue_campaign import CampaignCandidate
 
 
 class CampaignChangeRequestDeliverer:
+    """Commit and push a candidate, then create a draft PR or MR.
+
+    The publisher is the only component allowed to mint a verified COMMIT
+    artifact. The change-request provider is invoked only after that artifact
+    passes the run-level evidence gate.
+    """
+
     def __init__(
         self,
         provider: ChangeRequestProvider,
+        publisher: CampaignPublisher,
         *,
         base_branch: str,
-        head_branch: str | Callable[[EpisodePackage, CampaignCandidate], str],
         draft: bool = True,
     ) -> None:
         if not base_branch.strip():
             raise ValueError("base_branch is required")
         self.provider = provider
+        self.publisher = publisher
         self.base_branch = base_branch
-        self.head_branch = head_branch
         self.draft = draft
 
     async def deliver(
@@ -38,37 +51,48 @@ class CampaignChangeRequestDeliverer:
         episode: EpisodePackage,
         candidate: CampaignCandidate,
         artifacts: tuple[ResearchArtifactContract, ...],
-    ) -> ChangeRequestResult:
+    ) -> CampaignDeliveryReceipt:
+        publication = await self.publisher.publish(
+            episode,
+            candidate.checkpoint,
+        )
+        publication.validate(episode.run_id)
+
         repository = ResearchArtifactRepository()
-        for artifact in artifacts:
+        for artifact in (*artifacts, publication.artifact):
             repository.add(artifact)
         delivery = EvidenceGatedDelivery(repository, self.provider)
         request = ChangeRequest(
             repository=episode.repository,
             base_branch=self.base_branch,
-            head_branch=self._resolve_head(episode, candidate),
+            head_branch=publication.head_branch,
             title=self._title(episode),
-            body=self._body(episode, candidate, artifacts),
+            body=self._body(
+                episode,
+                candidate,
+                (*artifacts, publication.artifact),
+                publication,
+            ),
             draft=self.draft,
         )
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             delivery.create_for_run,
             episode.run_id,
             request,
         )
-
-    def _resolve_head(
-        self,
-        episode: EpisodePackage,
-        candidate: CampaignCandidate,
-    ) -> str:
-        if callable(self.head_branch):
-            value = self.head_branch(episode, candidate)
-        else:
-            value = self.head_branch
-        if not value.strip():
-            raise ValueError("head_branch resolver returned an empty branch")
-        return value
+        request_artifact = self._change_request_artifact(
+            episode,
+            result.url,
+            result.number,
+            publication,
+        )
+        receipt = CampaignDeliveryReceipt(
+            change_request=result,
+            publication=publication,
+            artifacts=(publication.artifact, request_artifact),
+        )
+        receipt.validate(episode.run_id)
+        return receipt
 
     @staticmethod
     def _title(episode: EpisodePackage) -> str:
@@ -87,6 +111,7 @@ class CampaignChangeRequestDeliverer:
         episode: EpisodePackage,
         candidate: CampaignCandidate,
         artifacts: tuple[ResearchArtifactContract, ...],
+        publication: CampaignPublication,
     ) -> str:
         criteria = "\n".join(
             f"- [x] {criterion}"
@@ -138,7 +163,9 @@ class CampaignChangeRequestDeliverer:
 - Episode digest: `{episode.digest()}`
 - Base revision: `{episode.base_revision}`
 - Candidate: `{candidate.checkpoint.candidate_id}`
-- Candidate revision: `{candidate.checkpoint.tree_revision}`
+- Candidate tree: `{candidate.checkpoint.tree_revision}`
+- Published commit: `{publication.commit_sha}`
+- Head branch: `{publication.head_branch}`
 - Risk score: `{candidate.checkpoint.risk_score:.3f}`
 
 ### Acceptance criteria
@@ -157,3 +184,25 @@ class CampaignChangeRequestDeliverer:
 
 > Generated by AutoResearch. Automatic merge remains disabled.
 """
+
+    @staticmethod
+    def _change_request_artifact(
+        episode: EpisodePackage,
+        url: str,
+        number: int | None,
+        publication: CampaignPublication,
+    ) -> ResearchArtifactContract:
+        return ResearchArtifactContract(
+            artifact_id=f"{episode.episode_id}-pull-request",
+            run_id=episode.run_id,
+            step_id=f"{episode.run_id}-delivery",
+            artifact_type=ResearchArtifactType.PULL_REQUEST,
+            path=url,
+            content_hash=ResearchArtifactContract.hash_content(url),
+            verified=bool(url),
+            metadata={
+                "number": number,
+                "commit_sha": publication.commit_sha,
+                "head_branch": publication.head_branch,
+            },
+        )
