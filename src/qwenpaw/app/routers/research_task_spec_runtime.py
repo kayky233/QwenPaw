@@ -28,6 +28,18 @@ _ACTIVE_TASK_SPEC: contextvars.ContextVar[TaskSpec | None] = contextvars.Context
 )
 
 
+def _runtime_context_for_dialog(
+    research_module: ModuleType,
+    dialog: Any,
+) -> dict[str, Any] | None:
+    """Return runtime context only for real persisted dialog objects."""
+
+    plan_id = getattr(dialog, "plan_id", "")
+    if not isinstance(plan_id, str) or not plan_id.strip():
+        return None
+    return research_module._dialog_runtime_context.setdefault(plan_id, {})
+
+
 def _explicit_operational_spec(
     dialog: Any,
     runtime_context: dict[str, Any],
@@ -235,10 +247,9 @@ def install_research_task_spec_runtime(research_module: ModuleType) -> None:
     base_execution_prompt = research_module._execution_prompt
 
     def execution_prompt(dialog: Any, worktree: Path) -> str:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
-        )
+        runtime_context = _runtime_context_for_dialog(research_module, dialog)
+        if runtime_context is None:
+            return base_execution_prompt(dialog, worktree)
         spec = resolve_task_spec(dialog, runtime_context)
         return (
             base_execution_prompt(dialog, worktree)
@@ -252,10 +263,9 @@ def install_research_task_spec_runtime(research_module: ModuleType) -> None:
     legacy_branch_builder = worktree_service.build_research_branch
 
     def build_research_branch(dialog: Any) -> str:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
-        )
+        runtime_context = _runtime_context_for_dialog(research_module, dialog)
+        if runtime_context is None:
+            return legacy_branch_builder(dialog)
         spec = _explicit_operational_spec(dialog, runtime_context)
         if spec is None or spec.task_type is ResearchTaskType.BUG_FIX:
             return legacy_branch_builder(dialog)
@@ -274,10 +284,9 @@ def install_research_task_spec_runtime(research_module: ModuleType) -> None:
     legacy_pr_title = delivery_service.dialog_pr_title
 
     def dialog_pr_title(dialog: Any) -> str:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
-        )
+        runtime_context = _runtime_context_for_dialog(research_module, dialog)
+        if runtime_context is None:
+            return legacy_pr_title(dialog)
         spec = _explicit_operational_spec(dialog, runtime_context)
         if spec is None or spec.task_type is ResearchTaskType.BUG_FIX:
             return legacy_pr_title(dialog)
@@ -293,10 +302,9 @@ def install_research_task_spec_runtime(research_module: ModuleType) -> None:
     legacy_commit_message = validation_pipeline.research_commit_message
 
     def research_commit_message(dialog: Any) -> str:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
-        )
+        runtime_context = _runtime_context_for_dialog(research_module, dialog)
+        if runtime_context is None:
+            return legacy_commit_message(dialog)
         spec = _explicit_operational_spec(dialog, runtime_context)
         if spec is None or spec.task_type is ResearchTaskType.BUG_FIX:
             return legacy_commit_message(dialog)
@@ -329,10 +337,9 @@ def install_research_task_spec_runtime(research_module: ModuleType) -> None:
         worktree: Path,
         dialog: Any,
     ) -> dict[str, Any]:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
-        )
+        runtime_context = _runtime_context_for_dialog(research_module, dialog)
+        if runtime_context is None:
+            return await base_validate(worktree, dialog)
         spec = _explicit_operational_spec(dialog, runtime_context)
         if spec is None:
             return await base_validate(worktree, dialog)
