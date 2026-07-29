@@ -90,6 +90,10 @@ class EpisodePackage:
             raise ValueError("acceptance criteria cannot be blank")
         if not self.modifiable_files:
             raise ValueError("at least one modifiable file is required")
+        if not self.commands:
+            raise ValueError("at least one validation command is required")
+        if not self.expected_artifacts:
+            raise ValueError("at least one expected artifact is required")
 
         modifiable = _validate_paths(
             self.modifiable_files,
