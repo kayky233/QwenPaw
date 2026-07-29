@@ -32,8 +32,24 @@ class Client:
 
 
 class Provider:
+    def __init__(self):
+        self.requests = []
+
     def create(self, request):
+        self.requests.append(request)
         return ChangeRequestResult("https://example.test/pr/1", 1)
+
+
+def _artifact(artifact_type, *, step_id="delivery", run_id="run"):
+    return ResearchArtifactContract(
+        artifact_id=f"{step_id}-{artifact_type.value}",
+        run_id=run_id,
+        step_id=step_id,
+        artifact_type=artifact_type,
+        path=artifact_type.value,
+        content_hash="0" * 64,
+        verified=True,
+    )
 
 
 def test_issue_fetcher_includes_comments():
@@ -56,21 +72,57 @@ def test_issue_solver_service_prepares_contextual_plan():
 
 def test_delivery_requires_verified_evidence():
     artifacts = ResearchArtifactRepository()
-    delivery = EvidenceGatedDelivery(artifacts, Provider())
+    provider = Provider()
+    delivery = EvidenceGatedDelivery(artifacts, provider)
     request = ChangeRequest("owner/repo", "main", "feature", "title", "body")
     with pytest.raises(RuntimeError):
         delivery.create("delivery", request)
 
     for artifact_type in EvidenceGatedDelivery.REQUIRED:
+        artifacts.add(_artifact(artifact_type))
+
+    assert delivery.create("delivery", request).number == 1
+    assert provider.requests == [request]
+
+
+def test_run_delivery_accepts_evidence_from_distinct_steps():
+    artifacts = ResearchArtifactRepository()
+    provider = Provider()
+    delivery = EvidenceGatedDelivery(artifacts, provider)
+    request = ChangeRequest("owner/repo", "main", "feature", "title", "body")
+    step_by_type = {
+        ResearchArtifactType.CODE_DIFF: "implement",
+        ResearchArtifactType.TEST_RESULT: "test",
+        ResearchArtifactType.REPORT: "review",
+        ResearchArtifactType.COMMIT: "delivery",
+    }
+    for artifact_type, step_id in step_by_type.items():
+        artifacts.add(_artifact(artifact_type, step_id=step_id))
+
+    result = delivery.create_for_run("run", request)
+
+    assert result.number == 1
+    assert artifacts.all_verified_for_run(
+        "run",
+        EvidenceGatedDelivery.REQUIRED,
+    )
+
+
+def test_run_delivery_rejects_evidence_from_other_run():
+    artifacts = ResearchArtifactRepository()
+    provider = Provider()
+    delivery = EvidenceGatedDelivery(artifacts, provider)
+    request = ChangeRequest("owner/repo", "main", "feature", "title", "body")
+    for artifact_type in EvidenceGatedDelivery.REQUIRED:
         artifacts.add(
-            ResearchArtifactContract(
-                artifact_id=artifact_type.value,
-                run_id="run",
-                step_id="delivery",
-                artifact_type=artifact_type,
-                path=artifact_type.value,
-                content_hash="0" * 64,
-                verified=True,
+            _artifact(
+                artifact_type,
+                step_id=artifact_type.value,
+                run_id="different-run",
             )
         )
-    assert delivery.create("delivery", request).number == 1
+
+    with pytest.raises(RuntimeError, match="code_diff"):
+        delivery.create_for_run("run", request)
+
+    assert provider.requests == []
