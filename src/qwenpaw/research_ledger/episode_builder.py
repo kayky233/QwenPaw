@@ -25,13 +25,16 @@ class IssueEpisodeBuilder:
         commands: tuple[EpisodeCommand, ...],
         frozen_files: tuple[str, ...] = (),
         environment: dict[str, str] | None = None,
+        modifiable_files: tuple[str, ...] = (),
     ) -> EpisodePackage:
         evidence = prepared.evidence
         context = prepared.contextual_plan.context_pack
-        modifiable_files = tuple(
+        localized_paths = tuple(
             dict.fromkeys((*context.affected_paths, *context.test_paths))
         )
-        if not modifiable_files:
+        approved_paths = tuple(dict.fromkeys(modifiable_files))
+        selected_paths = approved_paths or localized_paths
+        if not selected_paths:
             raise ValueError(
                 "issue localization produced no modifiable paths; "
                 "explicit scope approval is required"
@@ -47,7 +50,7 @@ class IssueEpisodeBuilder:
             goal=evidence.title,
             base_revision=base_revision,
             acceptance_criteria=acceptance_criteria,
-            modifiable_files=modifiable_files,
+            modifiable_files=selected_paths,
             frozen_files=frozen_files,
             commands=commands,
             expected_artifacts=(
@@ -82,6 +85,9 @@ class IssueEpisodeBuilder:
                 "context_truncated": context.truncated,
                 "context_estimated_tokens": context.estimated_tokens,
                 "context_downgrade_reason": context.downgrade_reason,
+                "scope_source": (
+                    "explicit_approval" if approved_paths else "repository_graph"
+                ),
                 "implementation_steps": list(plan.implementation_steps),
                 "validation_steps": list(plan.validation_steps),
             },
