@@ -36,8 +36,9 @@ class _Dialog:
 
 def test_plan_content_hash_binds_exact_utf8_content() -> None:
     plan = "# 计划\n\n## Modifiable Files\n- src/fix.py\n"
+    expected = hashlib.sha256(plan.encode("utf-8")).hexdigest()
 
-    assert plan_content_hash(plan) == hashlib.sha256(plan.encode("utf-8")).hexdigest()
+    assert plan_content_hash(plan) == expected
     assert plan_content_hash(plan) != plan_content_hash(plan + "\n")
 
 
@@ -79,7 +80,9 @@ def test_legacy_scope_failure_is_upgraded_with_preserved_evidence() -> None:
     assert recovered.verification_status == "blocked"
     assert recovered.updated_at == "2026-07-29T10:00:00+00:00"
     assert recovered.validation_attempts[-1]["attempt"] == 1
-    assert recovered.validation_attempts[-1]["changed_paths"] == dialog.changed_paths
+    assert recovered.validation_attempts[-1]["changed_paths"] == (
+        dialog.changed_paths
+    )
     assert "tests/test_fix.py" in recovered.validation_report
     assert "existing worktree was preserved" in recovered.validation_report
 
@@ -149,4 +152,6 @@ def test_real_router_uses_extracted_dialog_service() -> None:
 
     assert research_module._plan_content_hash is plan_content_hash
     assert research_module._dialog_payload is dialog_payload
-    assert research_module._recover_legacy_scope_failure is recover_legacy_scope_failure
+    assert research_module._recover_legacy_scope_failure is (
+        recover_legacy_scope_failure
+    )
