@@ -5,6 +5,9 @@ import pytest
 from qwenpaw.research_ledger.campaign_delivery import (
     CampaignChangeRequestDeliverer,
 )
+from qwenpaw.research_ledger.campaign_delivery_contract import (
+    CampaignPublication,
+)
 from qwenpaw.research_ledger.candidate_checkpoint import CandidateCheckpoint
 from qwenpaw.research_ledger.change_request_delivery import ChangeRequest
 from qwenpaw.research_ledger.change_request_providers import (
@@ -45,6 +48,33 @@ class GitLabClient:
             "web_url": "https://gitlab.example/group/repo/-/merge_requests/7",
             "iid": 7,
         }
+
+
+class Publisher:
+    def __init__(self):
+        self.calls = []
+
+    async def publish(self, episode, checkpoint):
+        self.calls.append((episode, checkpoint))
+        commit_sha = "c" * 40
+        artifact = ResearchArtifactContract(
+            artifact_id=f"{checkpoint.candidate_id}-commit",
+            run_id=episode.run_id,
+            step_id=f"{episode.run_id}-delivery",
+            artifact_type=ResearchArtifactType.COMMIT,
+            path=f"git://{commit_sha}",
+            content_hash=ResearchArtifactContract.hash_content(commit_sha),
+            verified=True,
+            metadata={
+                "commit_sha": commit_sha,
+                "head_branch": "autoresearch/candidate-1",
+            },
+        )
+        return CampaignPublication(
+            commit_sha=commit_sha,
+            head_branch="autoresearch/candidate-1",
+            artifact=artifact,
+        )
 
 
 def _request():
@@ -173,7 +203,7 @@ def _artifact(artifact_type, step_id, *, metadata=None, verified=True):
     )
 
 
-def _delivery_artifacts():
+def _pre_delivery_artifacts():
     return (
         _artifact(
             ResearchArtifactType.CODE_DIFF,
@@ -187,33 +217,36 @@ def _delivery_artifacts():
         ),
         _artifact(ResearchArtifactType.TEST_RESULT, "run-1-test"),
         _artifact(ResearchArtifactType.REPORT, "run-1-review"),
-        _artifact(ResearchArtifactType.COMMIT, "run-1-delivery"),
     )
 
 
 @pytest.mark.asyncio
 async def test_campaign_deliverer_builds_evidence_body_and_draft_pr():
     client = GitHubClient()
+    publisher = Publisher()
     deliverer = CampaignChangeRequestDeliverer(
         GitHubChangeRequestProvider(client),
+        publisher,
         base_branch="main",
-        head_branch=lambda episode, candidate: (
-            f"autoresearch/{candidate.checkpoint.candidate_id}"
-        ),
     )
 
-    result = await deliverer.deliver(
+    receipt = await deliverer.deliver(
         _episode(),
         _candidate(),
-        _delivery_artifacts(),
+        _pre_delivery_artifacts(),
     )
 
-    assert result.number == 9
+    assert receipt.change_request.number == 9
+    assert receipt.publication.commit_sha == "c" * 40
+    assert {item.artifact_type for item in receipt.artifacts} == {
+        ResearchArtifactType.COMMIT,
+        ResearchArtifactType.PULL_REQUEST,
+    }
     call = client.calls[0]
     assert call["draft"] is True
     assert call["head"] == "autoresearch/candidate-1"
     assert "Closes #12" in call["body"]
-    assert "Episode digest" in call["body"]
+    assert "Published commit" in call["body"]
     assert "Automatic merge remains disabled" in call["body"]
     assert "src/qwenpaw/memory/cache.py" in call["body"]
 
@@ -223,12 +256,12 @@ async def test_campaign_deliverer_blocks_missing_verified_test_result():
     client = GitHubClient()
     deliverer = CampaignChangeRequestDeliverer(
         GitHubChangeRequestProvider(client),
+        Publisher(),
         base_branch="main",
-        head_branch="autoresearch/candidate-1",
     )
     artifacts = tuple(
         artifact
-        for artifact in _delivery_artifacts()
+        for artifact in _pre_delivery_artifacts()
         if artifact.artifact_type != ResearchArtifactType.TEST_RESULT
     )
 
