@@ -21,8 +21,12 @@ from .research_worktree_service import (
 
 RunProcess = Callable[..., Awaitable[str]]
 RestCreator = Callable[[str, dict[str, str], str], str]
+UrlOpen = Callable[..., Any]
 
-_ISSUE_NUMBER_RE = re.compile(r"(?:issues?/|#)(\d{1,10})", re.IGNORECASE)
+_ISSUE_NUMBER_RE = re.compile(
+    r"(?:issues?/|#)(\d{1,10})",
+    re.IGNORECASE,
+)
 _GITHUB_REPOSITORY_NAME_RE = re.compile(
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
 )
@@ -40,16 +44,19 @@ def validate_github_repository_name(repository: str) -> str:
 def dialog_pr_head(dialog: Any) -> str:
     """Return the correct PR head for same-repository and fork workflows."""
 
-    upstream = validate_github_repository_name(dialog.upstream_repository)
+    upstream = validate_github_repository_name(
+        dialog.upstream_repository,
+    )
     push = validate_github_repository_name(dialog.push_repository)
     branch = validate_git_branch_name(dialog.branch)
+    if push.casefold() == upstream.casefold():
+        return branch
     push_owner = push.split("/", 1)[0]
-    upstream_owner = upstream.split("/", 1)[0]
-    return branch if push_owner == upstream_owner else f"{push_owner}:{branch}"
+    return f"{push_owner}:{branch}"
 
 
 def dialog_pr_title(dialog: Any) -> str:
-    """Build the current issue-oriented PR title without trusting raw markup."""
+    """Build the current issue-oriented PR title without trusting markup."""
 
     issue_match = _ISSUE_NUMBER_RE.search(
         f"{dialog.plan_markdown or ''}\n{dialog.goal}",
@@ -58,7 +65,9 @@ def dialog_pr_title(dialog: Any) -> str:
         return f"fix: resolve issue #{issue_match.group(1)}"
     goal = " ".join(dialog.goal.strip().split())[:180]
     if not goal:
-        raise RuntimeError("Cannot create a pull request with an empty goal")
+        raise RuntimeError(
+            "Cannot create a pull request with an empty goal",
+        )
     return f"fix: {goal}"
 
 
@@ -84,13 +93,30 @@ async def resolve_delivery_base_branch(
     worktree: Path,
     run_process: RunProcess,
 ) -> str:
-    """Resolve and cache the exact base branch used by the worktree."""
+    """Resolve and cache the exact base branch used by the worktree.
+
+    New Worktree Service runs always persist ``base_branch`` and
+    ``source_root`` in the runtime context. Calls created before that service,
+    including legacy unit-test fixtures, retain the historical ``main`` base
+    until Dialog Ledger persistence stores this field explicitly.
+    """
 
     cached = runtime_context.get("base_branch")
     if isinstance(cached, str) and cached.strip():
         return validate_git_branch_name(cached)
-    branch = await resolve_remote_default_branch(run_process, worktree)
+
+    source_root = runtime_context.get("source_root")
+    if not isinstance(source_root, str) or not source_root.strip():
+        runtime_context["base_branch"] = "main"
+        runtime_context["base_branch_source"] = "legacy_default"
+        return "main"
+
+    branch = await resolve_remote_default_branch(
+        run_process,
+        Path(source_root),
+    )
     runtime_context["base_branch"] = branch
+    runtime_context["base_branch_source"] = "remote_head"
     return branch
 
 
@@ -121,7 +147,7 @@ async def create_dialog_pr(
     environment: Mapping[str, str] | None = None,
     rest_creator: RestCreator | None = None,
 ) -> str:
-    """Create a GitHub PR using CLI first and REST as a credentialed fallback."""
+    """Create a GitHub PR using CLI first and REST as fallback."""
 
     validate_github_repository_name(dialog.upstream_repository)
     validate_github_repository_name(dialog.push_repository)
@@ -138,7 +164,9 @@ async def create_dialog_pr(
     )
 
     if executable_lookup("gh") is not None:
-        with tempfile.TemporaryDirectory(prefix="qwenpaw-research-pr-") as temp:
+        with tempfile.TemporaryDirectory(
+            prefix="qwenpaw-research-pr-",
+        ) as temp:
             body_file = Path(temp) / "pull-request.md"
             body_file.write_text(body, encoding="utf-8")
             pr_url = await run_process(
@@ -161,7 +189,9 @@ async def create_dialog_pr(
                 timeout=120,
             )
         if not pr_url.strip():
-            raise RuntimeError("GitHub CLI did not return a pull request URL")
+            raise RuntimeError(
+                "GitHub CLI did not return a pull request URL",
+            )
         return pr_url.strip()
 
     env = environment if environment is not None else os.environ
@@ -185,8 +215,10 @@ def create_dialog_pr_via_rest(
     repository: str,
     payload: dict[str, str],
     token: str,
+    *,
+    urlopen_func: UrlOpen = urlopen,
 ) -> str:
-    """Create a pull request through GitHub REST without leaking the token."""
+    """Create a pull request through REST without leaking the token."""
 
     safe_repository = validate_github_repository_name(repository)
     request = UrlRequest(
@@ -202,7 +234,7 @@ def create_dialog_pr_via_rest(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen_func(request, timeout=120) as response:
             status = response.status
             raw_response = response.read()
     except HTTPError as exc:
@@ -226,12 +258,16 @@ def create_dialog_pr_via_rest(
         ) from exc
     pr_url = response_data.get("html_url")
     if not isinstance(pr_url, str) or not pr_url.strip():
-        raise RuntimeError("GitHub API did not return a pull request URL")
+        raise RuntimeError(
+            "GitHub API did not return a pull request URL",
+        )
     return pr_url.strip()
 
 
-def install_research_delivery_service(research_module: ModuleType) -> None:
-    """Install delivery functions while preserving existing router call sites."""
+def install_research_delivery_service(
+    research_module: ModuleType,
+) -> None:
+    """Install delivery functions while preserving router call sites."""
 
     async def push(worktree: Path, branch: str) -> None:
         await push_research_branch(
@@ -240,10 +276,24 @@ def install_research_delivery_service(research_module: ModuleType) -> None:
             run_process=research_module._run_process,
         )
 
+    def rest_creator(
+        repository: str,
+        payload: dict[str, str],
+        token: str,
+    ) -> str:
+        return create_dialog_pr_via_rest(
+            repository,
+            payload,
+            token,
+            urlopen_func=research_module.urlopen,
+        )
+
     async def create_pr(worktree: Path, dialog: Any) -> str:
-        runtime_context = research_module._dialog_runtime_context.setdefault(
-            dialog.plan_id,
-            {},
+        runtime_context = (
+            research_module._dialog_runtime_context.setdefault(
+                dialog.plan_id,
+                {},
+            )
         )
         return await create_dialog_pr(
             worktree,
@@ -251,6 +301,9 @@ def install_research_delivery_service(research_module: ModuleType) -> None:
             runtime_context=runtime_context,
             run_process=research_module._run_process,
             build_body=research_module._build_dialog_pr_body,
+            executable_lookup=research_module.shutil.which,
+            environment=research_module.os.environ,
+            rest_creator=rest_creator,
         )
 
     research_module._validate_github_repository_name = (
@@ -258,8 +311,14 @@ def install_research_delivery_service(research_module: ModuleType) -> None:
     )
     research_module._dialog_pr_head = dialog_pr_head
     research_module._dialog_pr_title = dialog_pr_title
-    research_module._build_pull_request_payload = build_pull_request_payload
-    research_module._resolve_delivery_base_branch = resolve_delivery_base_branch
+    research_module._build_pull_request_payload = (
+        build_pull_request_payload
+    )
+    research_module._resolve_delivery_base_branch = (
+        resolve_delivery_base_branch
+    )
     research_module._push_research_branch = push
     research_module._create_dialog_pr = create_pr
-    research_module._create_dialog_pr_via_rest = create_dialog_pr_via_rest
+    research_module._create_dialog_pr_via_rest = (
+        create_dialog_pr_via_rest
+    )
