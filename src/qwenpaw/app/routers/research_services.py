@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import ModuleType
 
 from .research_delivery_service import install_research_delivery_service
+from .research_dialog_persistence import (
+    install_research_dialog_persistence,
+)
 from .research_dialog_service import install_research_dialog_service
 from .research_github_service import install_research_github_service
 from .research_planning_service import install_research_planning_service
@@ -31,3 +34,4 @@ def install_research_services(research_module: ModuleType) -> None:
     install_research_validation_pipeline(research_module)
     install_research_worktree_service(research_module)
     install_research_delivery_service(research_module)
+    install_research_dialog_persistence(research_module)
