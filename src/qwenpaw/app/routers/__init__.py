@@ -33,7 +33,13 @@ from .coding_project import router as coding_project_router
 from .access_control import router as access_control_router
 from .provider_oauth import router as provider_oauth_router
 from .pawapps import router as pawapps_router
+from . import research as research_module
 from .research import router as research_router
+from .research_scope import install_research_scope_policy
+
+# Keep the public research router API stable while moving security-sensitive
+# plan-scope parsing into a small, independently testable module.
+install_research_scope_policy(research_module)
 
 router = APIRouter()
 
