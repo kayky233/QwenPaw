@@ -39,14 +39,16 @@ from .research_dialog_service import install_research_dialog_service
 from .research_github_service import install_research_github_service
 from .research_scope import install_research_scope_policy
 from .research_state_machine import install_research_state_machine
+from .research_validation_service import install_research_validation_service
 
 # Keep the public research router API stable while moving security-sensitive
-# scope parsing, dialog state helpers, GitHub helpers, and lifecycle rules into
-# small, independently testable modules.
+# scope parsing, dialog state helpers, GitHub helpers, validation helpers, and
+# lifecycle rules into small, independently testable modules.
 install_research_scope_policy(research_module)
 install_research_state_machine(research_module)
 install_research_dialog_service(research_module)
 install_research_github_service(research_module)
+install_research_validation_service(research_module)
 
 router = APIRouter()
 
