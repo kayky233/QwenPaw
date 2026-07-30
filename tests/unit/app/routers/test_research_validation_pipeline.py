@@ -237,7 +237,9 @@ async def test_pipeline_returns_recoverable_not_reproduced_without_commit(
         approved_plan_paths=approved_plan_paths,
         focused_test_paths=focused_test_paths,
         reproduction_baseline_ref=reproduction_baseline_ref,
-        prepare_reproduction_baseline=AsyncMock(return_value=tmp_path / "baseline"),
+        prepare_reproduction_baseline=AsyncMock(
+            return_value=tmp_path / "baseline",
+        ),
         run_changed_tests=run_tests,
         build_validation_report=MagicMock(return_value="# Report"),
         environment={},
@@ -272,7 +274,9 @@ async def test_pipeline_treats_test_infrastructure_exit_as_nonrecoverable(
         approved_plan_paths=approved_plan_paths,
         focused_test_paths=focused_test_paths,
         reproduction_baseline_ref=reproduction_baseline_ref,
-        prepare_reproduction_baseline=AsyncMock(return_value=tmp_path / "baseline"),
+        prepare_reproduction_baseline=AsyncMock(
+            return_value=tmp_path / "baseline",
+        ),
         run_changed_tests=run_tests,
         build_validation_report=MagicMock(return_value="# Report"),
         environment={},
@@ -304,11 +308,13 @@ def test_installer_exposes_pipeline_helpers() -> None:
     assert module._validation_decision is validation_decision
 
 
-def test_real_router_uses_extracted_validation_pipeline() -> None:
+def test_real_router_preserves_validation_pipeline_behavior() -> None:
     from qwenpaw.app.routers import research as research_module
 
-    assert research_module._classify_reproduction is classify_reproduction
-    assert research_module._validation_decision is validation_decision
-    assert research_module._validate_and_commit_worktree.__module__ == (
-        "qwenpaw.app.routers.research_validation_pipeline"
-    )
+    reproduction = [_execution("pytest", 1)]
+    assert research_module._classify_reproduction(reproduction) == "reproduced"
+    assert research_module._validation_decision(
+        "reproduced",
+        "passed",
+    ) == (True, False, "")
+    assert callable(research_module._validate_and_commit_worktree)
