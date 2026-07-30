@@ -1,7 +1,5 @@
 """Unit tests for research_ledger schema constraints and required tables."""
 
-import pytest
-
 from qwenpaw.research_ledger.schema import (
     Base,
     ResearchArtifact,
