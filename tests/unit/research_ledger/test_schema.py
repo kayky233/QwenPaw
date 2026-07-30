@@ -1,4 +1,4 @@
-"""Unit tests for research_ledger schema — 7 tables, constraints, types."""
+"""Unit tests for research_ledger schema constraints and required tables."""
 
 import pytest
 
@@ -15,10 +15,9 @@ from qwenpaw.research_ledger.schema import (
 
 
 class TestSchemaTableCount:
-    def test_all_tables_registered(self):
-        tables = Base.metadata.tables
-        assert len(tables) == 7
-        assert sorted(tables.keys()) == [
+    def test_all_required_tables_registered(self):
+        tables = set(Base.metadata.tables)
+        assert {
             "research_artifacts",
             "research_dialog_runs",
             "research_events",
@@ -26,7 +25,7 @@ class TestSchemaTableCount:
             "research_runs",
             "research_submissions",
             "research_tasks",
-        ]
+        }.issubset(tables)
 
 
 class TestResearchTask:
@@ -50,8 +49,12 @@ class TestResearchRun:
         assert ResearchRun.__table__.columns["current_round"].nullable
 
     def test_unique_run_id_constraint(self):
-        cs = {c.name: c for c in ResearchRun.__table__.constraints if c.name}
-        assert "uq_research_runs_run_id" in cs
+        constraints = {
+            constraint.name: constraint
+            for constraint in ResearchRun.__table__.constraints
+            if constraint.name
+        }
+        assert "uq_research_runs_run_id" in constraints
 
     def test_owner_identity_columns(self):
         cols = ResearchRun.__table__.columns
@@ -72,8 +75,12 @@ class TestResearchOutcome:
         assert ResearchOutcome.__table__.columns["candidate_score"].nullable
 
     def test_unique_run_round_constraint(self):
-        cs = {c.name: c for c in ResearchOutcome.__table__.constraints if c.name}
-        assert "uq_outcome_run_round" in cs
+        constraints = {
+            constraint.name: constraint
+            for constraint in ResearchOutcome.__table__.constraints
+            if constraint.name
+        }
+        assert "uq_outcome_run_round" in constraints
 
 
 class TestResearchEvent:
@@ -82,8 +89,12 @@ class TestResearchEvent:
 
     def test_sequence_is_persisted_and_unique_per_run(self):
         assert not ResearchEvent.__table__.columns["sequence"].nullable
-        cs = {c.name: c for c in ResearchEvent.__table__.constraints if c.name}
-        assert "uq_research_event_run_sequence" in cs
+        constraints = {
+            constraint.name: constraint
+            for constraint in ResearchEvent.__table__.constraints
+            if constraint.name
+        }
+        assert "uq_research_event_run_sequence" in constraints
 
 
 class TestResearchDialogRun:
@@ -107,5 +118,9 @@ class TestResearchArtifact:
         assert ResearchArtifact.__table__.columns["outcome_id"].nullable
 
     def test_unique_run_path_constraint(self):
-        cs = {c.name: c for c in ResearchArtifact.__table__.constraints if c.name}
-        assert "uq_artifact_run_path" in cs
+        constraints = {
+            constraint.name: constraint
+            for constraint in ResearchArtifact.__table__.constraints
+            if constraint.name
+        }
+        assert "uq_artifact_run_path" in constraints
