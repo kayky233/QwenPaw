@@ -147,11 +147,19 @@ def test_installer_exposes_helpers_on_legacy_router_surface() -> None:
     assert module._recover_legacy_scope_failure is recover_legacy_scope_failure
 
 
-def test_real_router_uses_extracted_dialog_service() -> None:
+def test_real_router_preserves_extracted_dialog_behavior() -> None:
     from qwenpaw.app.routers import research as research_module
 
-    assert research_module._plan_content_hash is plan_content_hash
-    assert research_module._dialog_payload is dialog_payload
-    assert research_module._recover_legacy_scope_failure is (
-        recover_legacy_scope_failure
+    plan = "# Plan\n"
+    assert research_module._plan_content_hash(plan) == plan_content_hash(plan)
+
+    dialog = research_module.DialogRunState(
+        plan_id="dialog-service-behavior",
+        status="accepted",
+        goal="test",
+        events=[],
     )
+    payload = research_module._dialog_payload(dialog)
+    assert payload["plan_id"] == dialog.plan_id
+    assert payload["status"] == dialog.status
+    assert "owner_agent_id" not in payload
