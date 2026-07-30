@@ -59,7 +59,7 @@ def test_task_spec_api_adds_contract_to_pr_body() -> None:
     assert "- Goal: Add memory TTL support" in body
 
 
-def test_task_spec_api_leaves_non_dialog_payload_unchanged() -> None:
+def test_task_spec_api_leaves_non_dialog_contract_unchanged() -> None:
     module = _module()
     install_research_task_spec_api(module)
 
@@ -67,7 +67,8 @@ def test_task_spec_api_leaves_non_dialog_payload_unchanged() -> None:
         SimpleNamespace(goal="Legacy helper", plan_id=""),
     )
 
-    assert payload == {"goal": "Legacy helper"}
+    assert payload["goal"] == "Legacy helper"
+    assert "task_spec" not in payload
     assert module._dialog_runtime_context == {}
 
 
