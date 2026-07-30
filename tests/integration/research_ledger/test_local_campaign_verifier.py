@@ -46,7 +46,20 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, _run(repository, "git", "rev-parse", "HEAD")
 
 
-def _episode(path: Path, base_revision: str) -> EpisodePackage:
+def _episode(
+    path: Path,
+    base_revision: str,
+    *,
+    command_argv: tuple[str, ...] | None = None,
+) -> EpisodePackage:
+    argv = command_argv or (
+        sys.executable,
+        "-c",
+        (
+            "source = open('src/value.py', encoding='utf-8').read(); "
+            "compile(source, 'src/value.py', 'exec')"
+        ),
+    )
     package = EpisodePackage(
         episode_id="local-e2e-issue-1",
         run_id="local-e2e",
@@ -61,13 +74,7 @@ def _episode(path: Path, base_revision: str) -> EpisodePackage:
             EpisodeCommand(
                 command_id="compile",
                 stage="unit",
-                argv=(
-                    sys.executable,
-                    "-m",
-                    "compileall",
-                    "-q",
-                    "src/value.py",
-                ),
+                argv=argv,
             ),
         ),
         expected_artifacts=(
@@ -143,3 +150,35 @@ async def test_local_verifier_runs_full_campaign_without_remote_write(
     assert "Remote change request created: `no`" in markdown
     assert "Automatic merge" not in markdown
     assert result.commit_sha in markdown
+
+
+@pytest.mark.asyncio
+async def test_local_verifier_rejects_validation_side_effects(
+    tmp_path: Path,
+) -> None:
+    repository, base_revision = _repository(tmp_path)
+    episode_path = tmp_path / "episode.json"
+    patch_path = tmp_path / "candidate.patch"
+    report_dir = tmp_path / "report"
+    _episode(
+        episode_path,
+        base_revision,
+        command_argv=(
+            sys.executable,
+            "-c",
+            "open('generated.txt', 'w', encoding='utf-8').write('side effect')",
+        ),
+    )
+    _patch(repository, patch_path)
+
+    with pytest.raises(RuntimeError, match="changed after validation"):
+        await verify_local_campaign(
+            repository,
+            episode_path,
+            patch_path,
+            report_dir,
+        )
+
+    assert _run(repository, "git", "rev-parse", "HEAD") == base_revision
+    assert _run(repository, "git", "status", "--porcelain") == ""
+    assert not (report_dir / "local-e2e-worktree").exists()
