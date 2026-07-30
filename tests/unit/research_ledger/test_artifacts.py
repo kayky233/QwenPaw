@@ -1,6 +1,5 @@
 """Unit tests for FileLocalArtifactStore."""
 
-import asyncio
 import hashlib
 import tempfile
 from pathlib import Path
@@ -58,7 +57,12 @@ class TestFileLocalArtifactStore:
 
     @pytest.mark.asyncio
     async def test_store_and_retrieve_text(self, store):
-        meta = await store.store("run-1", "hello world", "test.txt", "text/plain")
+        meta = await store.store(
+            "run-1",
+            "hello world",
+            "test.txt",
+            "text/plain",
+        )
         assert meta.run_id == "run-1"
         assert meta.size_bytes == 11
         assert meta.content_type == "text/plain"
@@ -71,7 +75,12 @@ class TestFileLocalArtifactStore:
     @pytest.mark.asyncio
     async def test_store_and_retrieve_bytes(self, store):
         data = b"\x00\x01\x02\x03"
-        await store.store("run-2", data, "binary.bin", "application/octet-stream")
+        await store.store(
+            "run-2",
+            data,
+            "binary.bin",
+            "application/octet-stream",
+        )
         result = await store.retrieve("run-2", "binary.bin")
         assert result == data
 
