@@ -117,9 +117,25 @@ def test_installer_exposes_github_helpers_on_legacy_router() -> None:
     assert module._build_dialog_pr_body is build_dialog_pr_body
 
 
-def test_real_router_uses_extracted_github_helpers() -> None:
+def test_real_router_preserves_github_helper_behavior() -> None:
     from qwenpaw.app.routers import research as research_module
 
-    assert research_module._github_repository is github_repository
-    assert research_module._github_remote_identity is github_remote_identity
-    assert research_module._build_dialog_pr_body is build_dialog_pr_body
+    dialog = SimpleNamespace(
+        goal="Fix https://github.com/kayky233/QwenPaw/issues/6470",
+        plan_markdown="",
+    )
+    assert research_module._github_repository(dialog) == github_repository(dialog)
+    assert research_module._github_remote_identity(
+        "git@github.com:kayky233/QwenPaw.git"
+    ) == ("kayky233", "QwenPaw")
+
+    delivery = SimpleNamespace(
+        goal="Fix issue 6470",
+        branch="autoresearch/issue-6470-test",
+        commit_sha="abc123def456",
+        validation_report="# Validation\n\nFocused tests passed.",
+        plan_markdown="Task Type: bug_fix",
+    )
+    body = research_module._build_dialog_pr_body(delivery)
+    assert "Focused tests passed." in body
+    assert "abc123def456" in body
