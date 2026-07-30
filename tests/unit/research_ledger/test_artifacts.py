@@ -42,7 +42,8 @@ class TestArtifactMetadata:
 
 class TestLocalArtifactStoreProtocol:
     def test_is_runtime_checkable(self):
-        assert hasattr(LocalArtifactStore, "__protocol_attrs__")
+        store = FileLocalArtifactStore(Path(tempfile.mkdtemp()))
+        assert isinstance(store, LocalArtifactStore)
 
     def test_file_store_implements_protocol(self):
         store = FileLocalArtifactStore(Path(tempfile.mkdtemp()))
@@ -61,7 +62,6 @@ class TestFileLocalArtifactStore:
         assert meta.run_id == "run-1"
         assert meta.size_bytes == 11
         assert meta.content_type == "text/plain"
-        # SHA256 of "hello world"
         expected_hash = hashlib.sha256(b"hello world").hexdigest()
         assert meta.content_hash == expected_hash
 
@@ -88,11 +88,7 @@ class TestFileLocalArtifactStore:
 
         count = await store.delete_run_artifacts("run-1")
         assert count == 2
-
-        # run-2 still exists
         assert len(await store.run_artifact_paths("run-2")) == 1
-
-        # run-1 dir is gone
         with pytest.raises(FileNotFoundError):
             await store.retrieve("run-1", "a.txt")
 
@@ -108,9 +104,8 @@ class TestFileLocalArtifactStore:
 
         paths = await store.run_artifact_paths("run-1")
         assert len(paths) == 2
-        # Paths are relative to root
-        for p in paths:
-            assert p.startswith("run-1/")
+        for path in paths:
+            assert path.startswith("run-1/")
 
     @pytest.mark.asyncio
     async def test_run_artifact_paths_empty(self, store):
@@ -122,13 +117,15 @@ class TestFileLocalArtifactStore:
         await store.store("run-1", "content", "file.txt")
         run_dir = Path(store._root) / "run-1"
         files = list(run_dir.iterdir())
-        # Only the target file exists, no .tmp files
         assert len(files) == 1
         assert files[0].name == "file.txt"
 
     @pytest.mark.asyncio
     async def test_outcome_id_in_metadata(self, store):
         meta = await store.store(
-            "run-1", "data", "data.txt", outcome_id="outcome-42"
+            "run-1",
+            "data",
+            "data.txt",
+            outcome_id="outcome-42",
         )
         assert meta.outcome_id == "outcome-42"
