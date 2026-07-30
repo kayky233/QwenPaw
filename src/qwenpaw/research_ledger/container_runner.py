@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import subprocess
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 from .execution_runner import (
     CommandRequest,
@@ -84,13 +84,21 @@ class ContainerExecutionRunner:
                 runner_name=type(self).__name__,
             )
         except subprocess.TimeoutExpired as exc:
+            stdout = self._timeout_text(exc.stdout)
+            stderr = self._timeout_text(exc.stderr)
             return CommandResult(
                 argv=argv,
                 cwd=request.cwd,
                 exit_code=124,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
+                stdout=stdout,
+                stderr=stderr,
                 duration_seconds=time.monotonic() - started,
                 timed_out=True,
                 runner_name=type(self).__name__,
             )
+
+    @staticmethod
+    def _timeout_text(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value or ""
