@@ -102,9 +102,7 @@ Windows 11 AMD64, exe installer
 def test_task_title_uses_first_markdown_heading() -> None:
     program = "Intro text\n\n##   Fix stream recovery\n"
 
-    assert task_title(program, "fallback") == (
-        "Fix stream recovery"
-    )
+    assert task_title(program, "fallback") == "Fix stream recovery"
     assert task_title("plain text", "fallback") == "fallback"
 
 
@@ -155,10 +153,7 @@ def test_execution_prompt_contains_approval_and_scope_contract(
     dialog = SimpleNamespace(
         approved_revision=3,
         approved_content_hash="a" * 64,
-        plan_markdown=(
-            "## Modifiable Files\n"
-            "- src/fix.py\n"
-        ),
+        plan_markdown="## Modifiable Files\n- src/fix.py\n",
         validation_attempts=[],
         validation_report="",
         unapproved_paths=[],
@@ -194,9 +189,7 @@ def test_execution_prompt_preserves_previous_validation_feedback(
 
 def test_installer_uses_router_environment_test_seam() -> None:
     module = SimpleNamespace(
-        _current_research_environment=(
-            current_research_environment
-        ),
+        _current_research_environment=current_research_environment,
     )
     install_research_planning_service(module)
     module._current_research_environment = lambda *_: (
@@ -212,18 +205,32 @@ def test_installer_uses_router_environment_test_seam() -> None:
     assert result[1] == "Windows (AMD64)"
 
 
-def test_real_router_uses_extracted_planning_service() -> None:
+def test_real_router_preserves_planning_service_behavior() -> None:
     from qwenpaw.app.routers import research as research_module
 
-    assert research_module._current_research_environment is (
-        current_research_environment
+    assert research_module._task_title(
+        "# Router title\n",
+        "fallback",
+    ) == task_title("# Router title\n", "fallback")
+    assert research_module._derive_task_id(
+        "Fix Runtime State",
+    ) == derive_task_id("Fix Runtime State")
+    assert research_module._extract_phase_content(
+        "<<<FILE:program.md>>>\n# Plan\n<<<END>>>",
+        "program.md",
+    ) == "# Plan"
+
+    dialog = SimpleNamespace(
+        approved_revision=1,
+        approved_content_hash="a" * 64,
+        plan_markdown="## Modifiable Files\n- src/fix.py\n",
+        validation_attempts=[],
+        validation_report="",
+        unapproved_paths=[],
     )
-    assert research_module._task_title is task_title
-    assert research_module._derive_task_id is derive_task_id
-    assert research_module._extract_phase_content is (
-        extract_phase_content
-    )
-    assert research_module._execution_prompt is execution_prompt
+    prompt = research_module._execution_prompt(dialog, Path("/tmp/worktree"))
+    assert "Approved revision: 1" in prompt
+    assert "src/fix.py" in prompt
 
 
 def test_real_router_keeps_scope_guard_over_environment_policy() -> None:
