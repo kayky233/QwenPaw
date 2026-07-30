@@ -73,9 +73,6 @@ _TERMINAL_STATUSES = frozenset(
 )
 _RECOVERABLE_STATUSES = frozenset({ResearchStatus.NEEDS_REVISION.value})
 
-# Same-status updates are always allowed and are handled before this table.
-# ``failed -> needs_revision`` is intentionally narrow: it supports recovery of
-# preserved worktrees created before recoverable validation failures existed.
 _ALLOWED_DIALOG_TRANSITIONS: dict[str, frozenset[str]] = {
     ResearchStatus.ACCEPTED.value: frozenset(
         {
@@ -221,8 +218,8 @@ def _install_mutable_status_guard(dialog_type: type[Any]) -> None:
             validate_dialog_transition(self.__dict__["status"], value)
         original_setattr(self, name, value)
 
-    dialog_type.__setattr__ = guarded_setattr  # type: ignore[method-assign]
-    dialog_type.__research_status_guard_installed__ = True
+    setattr(dialog_type, "__setattr__", guarded_setattr)
+    setattr(dialog_type, "__research_status_guard_installed__", True)
 
 
 def install_research_state_machine(research_module: ModuleType) -> None:
@@ -235,11 +232,11 @@ def install_research_state_machine(research_module: ModuleType) -> None:
     if not isinstance(current_store, TransitionGuardedDialogStore):
         research_module._dialog_runs = TransitionGuardedDialogStore(current_store)
 
-    # Expose small helpers on the legacy module while callers are gradually
-    # migrated away from the monolithic router implementation.
     research_module.ResearchStatus = ResearchStatus
     research_module.ResearchPhase = ResearchPhase
     research_module.InvalidResearchTransition = InvalidResearchTransition
     research_module._validate_dialog_transition = validate_dialog_transition
     research_module._is_terminal_research_status = is_terminal_research_status
-    research_module._is_recoverable_research_status = is_recoverable_research_status
+    research_module._is_recoverable_research_status = (
+        is_recoverable_research_status
+    )
