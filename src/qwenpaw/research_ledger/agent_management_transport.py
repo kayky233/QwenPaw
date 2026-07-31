@@ -50,9 +50,12 @@ class AgentManagementTaskTransport:
             payload["deadline"] = envelope.deadline.isoformat()
         return (
             "Execute the following AutoResearch Task Envelope. Respect the "
-            "allowed paths and read_only flag. Do not commit, push, or create "
-            "a pull request. Return a concise summary of actions, files, test "
-            "evidence, and blockers.\n\n"
+            "allowed paths, read_only flag, and every response-format rule in "
+            "the objective. Do not commit, push, or create a pull request. "
+            "When the objective requires an exact JSON or other structured "
+            "response, return only that requested structure with no prose or "
+            "code fence. Otherwise return a concise summary of actions, files, "
+            "test evidence, and blockers.\n\n"
             + json.dumps(payload, ensure_ascii=False, indent=2)
         )
 
