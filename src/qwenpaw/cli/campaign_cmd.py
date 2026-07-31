@@ -15,11 +15,17 @@ from ..research_ledger.guarded_remote_campaign_e2e import (
     run_guarded_remote_draft_pr_e2e,
 )
 from ..research_ledger.local_campaign_verifier import verify_local_campaign
+from ..research_ledger.remote_campaign_control import (
+    CLEANUP_CONFIRMATION,
+    PROMOTE_CONFIRMATION,
+    cleanup_remote_e2e_pull_request,
+    promote_remote_e2e_draft,
+)
 
 
 @click.group("campaign")
 def campaign_cmd() -> None:
-    """Verify AutoResearch Issue Campaign delivery flows."""
+    """Verify and control AutoResearch Issue Campaign delivery flows."""
 
 
 @campaign_cmd.command("local-verify")
@@ -147,5 +153,73 @@ def remote_e2e_cmd(
             monitor_interval_seconds=monitor_interval,
             keep_worktree=keep_worktree,
         )
+    )
+    click.echo(json.dumps(result.to_dict(), ensure_ascii=False))
+
+
+@campaign_cmd.command("promote-ready")
+@click.option(
+    "--report",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--allow-repository",
+    required=True,
+    multiple=True,
+    help="Exact owner/repository allowlist entry. Repeat to add entries.",
+)
+@click.option(
+    "--confirm",
+    required=True,
+    help=f"Must equal {PROMOTE_CONFIRMATION!r}.",
+)
+def promote_ready_cmd(
+    report: Path,
+    allow_repository: tuple[str, ...],
+    confirm: str,
+) -> None:
+    """Mark one validated E2E Draft PR ready; never merge it."""
+
+    if confirm != PROMOTE_CONFIRMATION:
+        raise click.UsageError("Draft PR promotion confirmation mismatch")
+    result = promote_remote_e2e_draft(
+        report,
+        confirmation=confirm,
+        allowed_repositories=allow_repository,
+    )
+    click.echo(json.dumps(result.to_dict(), ensure_ascii=False))
+
+
+@campaign_cmd.command("cleanup-e2e")
+@click.option(
+    "--report",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--allow-repository",
+    required=True,
+    multiple=True,
+    help="Exact owner/repository allowlist entry. Repeat to add entries.",
+)
+@click.option(
+    "--confirm",
+    required=True,
+    help=f"Must equal {CLEANUP_CONFIRMATION!r}.",
+)
+def cleanup_e2e_cmd(
+    report: Path,
+    allow_repository: tuple[str, ...],
+    confirm: str,
+) -> None:
+    """Close one known E2E PR and delete only its protected test branch."""
+
+    if confirm != CLEANUP_CONFIRMATION:
+        raise click.UsageError("E2E cleanup confirmation mismatch")
+    result = cleanup_remote_e2e_pull_request(
+        report,
+        confirmation=confirm,
+        allowed_repositories=allow_repository,
     )
     click.echo(json.dumps(result.to_dict(), ensure_ascii=False))
