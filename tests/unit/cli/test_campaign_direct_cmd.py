@@ -11,6 +11,7 @@ from qwenpaw.research_ledger.campaign_api_client import CampaignWaitResult
 
 class _Client:
     started_payload = None
+    remote_delivery_available = True
 
     def __init__(self, *args, **kwargs) -> None:
         pass
@@ -22,9 +23,21 @@ class _Client:
             "delivery_modes": ["local", "draft_pr"],
             "default_delivery_mode": "local",
             "automatic_merge": False,
+            "git_available": True,
+            "github_cli_available": True,
+            "github_token_available": False,
+            "remote_delivery_available": type(self).remote_delivery_available,
             "agents": [
-                {"id": "coder", "workspace_dir": "/tmp/coder"},
-                {"id": "reviewer", "workspace_dir": "/tmp/reviewer"},
+                {
+                    "id": "coder",
+                    "workspace_dir": "/tmp/coder",
+                    "startup_status": "running",
+                },
+                {
+                    "id": "reviewer",
+                    "workspace_dir": "/tmp/reviewer",
+                    "startup_status": "running",
+                },
             ],
         }
 
@@ -123,6 +136,7 @@ def test_campaign_run_starts_waits_and_writes_reports(
 
 def test_campaign_doctor_validates_selected_agents(monkeypatch) -> None:
     monkeypatch.setattr(campaign_module, "CampaignApiClient", _Client)
+    _Client.remote_delivery_available = True
 
     result = CliRunner().invoke(
         campaign_module.campaign_cmd,
@@ -137,3 +151,24 @@ def test_campaign_doctor_validates_selected_agents(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert '"ready": true' in result.output
+
+
+def test_campaign_doctor_uses_server_remote_readiness(monkeypatch) -> None:
+    monkeypatch.setattr(campaign_module, "CampaignApiClient", _Client)
+    _Client.remote_delivery_available = False
+
+    result = CliRunner().invoke(
+        campaign_module.campaign_cmd,
+        [
+            "doctor",
+            "--delivery",
+            "draft_pr",
+            "--implementer",
+            "coder",
+            "--reviewer",
+            "reviewer",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "GitHub token" in result.output
