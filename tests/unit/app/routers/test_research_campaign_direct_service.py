@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from starlette.requests import Request
 
 from qwenpaw.app.routers import research_campaign_direct_service as service
@@ -68,13 +68,27 @@ def _endpoint(module, path: str, method: str):
     )
 
 
-@pytest.mark.asyncio
-async def test_direct_run_defaults_to_local_delivery_and_persists_state(
-    tmp_path: Path,
-) -> None:
-    module = _module(tmp_path)
-    service.install_research_campaign_direct_service(module)
-    request = Request(
+def _agents(*, reviewer_status: str = "running") -> dict:
+    return {
+        "agents": [
+            {
+                "id": "coder",
+                "workspace_dir": "/tmp/coder",
+                "enabled": True,
+                "startup_status": "running",
+            },
+            {
+                "id": "reviewer",
+                "workspace_dir": "/tmp/reviewer",
+                "enabled": True,
+                "startup_status": reviewer_status,
+            },
+        ]
+    }
+
+
+def _request() -> Request:
+    return Request(
         {
             "type": "http",
             "method": "POST",
@@ -88,7 +102,10 @@ async def test_direct_run_defaults_to_local_delivery_and_persists_state(
             ),
         }
     )
-    body = service.RunIssueCampaignRequest(
+
+
+def _body(*, delivery_mode: str = "local") -> service.RunIssueCampaignRequest:
+    return service.RunIssueCampaignRequest(
         repository="owner/repository",
         issue_number=7,
         acceptance_criteria=["Fix the regression"],
@@ -102,11 +119,23 @@ async def test_direct_run_defaults_to_local_delivery_and_persists_state(
         ],
         implementer_agent_id="coder",
         reviewer_agent_id="reviewer",
+        delivery_mode=delivery_mode,
     )
 
+
+@pytest.mark.asyncio
+async def test_direct_run_defaults_to_local_delivery_and_persists_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _module(tmp_path)
+    monkeypatch.setattr(service, "list_agents_data", _agents)
+    monkeypatch.setattr(service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    service.install_research_campaign_direct_service(module)
+
     response = await _endpoint(module, "/campaigns/run", "POST")(
-        body,
-        request,
+        _body(),
+        _request(),
     )
     await module._campaign_tasks[response["campaign_id"]]
     state = module._campaign_runs[response["campaign_id"]]
@@ -115,6 +144,31 @@ async def test_direct_run_defaults_to_local_delivery_and_persists_state(
     assert state.status == "delivered"
     assert state.outcome["delivery_mode"] == "local"
     assert (module._campaign_snapshot_root / f"{state.campaign_id}.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_direct_run_rejects_non_running_agent_before_acceptance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _module(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "list_agents_data",
+        lambda: _agents(reviewer_status="failed"),
+    )
+    monkeypatch.setattr(service.shutil, "which", lambda name: f"/usr/bin/{name}")
+    service.install_research_campaign_direct_service(module)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _endpoint(module, "/campaigns/run", "POST")(
+            _body(),
+            _request(),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "reviewer" in str(exc_info.value.detail)
+    assert module._campaign_runs == {}
 
 
 @pytest.mark.asyncio
@@ -128,18 +182,7 @@ async def test_campaign_info_exposes_only_running_agents_and_capabilities(
         "list_agents_data",
         lambda: {
             "agents": [
-                {
-                    "id": "coder",
-                    "workspace_dir": "/tmp/coder",
-                    "enabled": True,
-                    "startup_status": "running",
-                },
-                {
-                    "id": "reviewer",
-                    "workspace_dir": "/tmp/reviewer",
-                    "enabled": True,
-                    "startup_status": "running",
-                },
+                *_agents()["agents"],
                 {
                     "id": "failed-reviewer",
                     "workspace_dir": "/tmp/failed",
