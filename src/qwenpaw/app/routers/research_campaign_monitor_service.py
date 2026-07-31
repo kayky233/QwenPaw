@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -14,6 +13,18 @@ from ...research_ledger.github_delivery_monitor import (
     fetch_github_delivery_snapshot,
 )
 from . import research_campaign_direct_service as direct_service
+
+
+def _checks_payload(checks: tuple[Any, ...]) -> list[dict[str, str]]:
+    return [
+        {
+            "name": str(item.name),
+            "status": str(item.status.value),
+            "url": str(item.url),
+            "summary": str(item.summary),
+        }
+        for item in checks
+    ]
 
 
 async def _monitor_delivery(
@@ -55,7 +66,7 @@ async def _monitor_delivery(
                     "status": final_status,
                     "commit_sha": observed_sha,
                     "review_decision": snapshot.review_decision,
-                    "checks": [asdict(item) for item in snapshot.ci_report.checks],
+                    "checks": _checks_payload(snapshot.ci_report.checks),
                     "blockers": ["commit_sha_mismatch"],
                 }
             )
@@ -78,7 +89,10 @@ async def _monitor_delivery(
             blockers.append("changes_requested")
         elif decision == "APPROVED":
             final_status = "merge_ready"
-            reason = "CI passed and review is approved; automatic merge remains disabled"
+            reason = (
+                "CI passed and review is approved; "
+                "automatic merge remains disabled"
+            )
         else:
             final_status = "review_waiting"
             reason = "CI passed and human review is still required"
@@ -90,15 +104,7 @@ async def _monitor_delivery(
                 "status": final_status,
                 "commit_sha": observed_sha,
                 "review_decision": decision,
-                "checks": [
-                    {
-                        "name": item.name,
-                        "status": item.status.value,
-                        "url": item.url,
-                        "summary": item.summary,
-                    }
-                    for item in snapshot.ci_report.checks
-                ],
+                "checks": _checks_payload(snapshot.ci_report.checks),
                 "blockers": blockers,
             }
         )
