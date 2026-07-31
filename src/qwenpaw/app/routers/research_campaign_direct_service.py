@@ -64,6 +64,43 @@ def _agent_payload(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_info(research_module: ModuleType, data: Any) -> dict[str, Any]:
+    raw_agents = data.get("agents", []) if isinstance(data, dict) else []
+    agents = [
+        _agent_payload(item)
+        for item in raw_agents
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    ]
+    ready_agents = [
+        item
+        for item in agents
+        if item["enabled"]
+        and item["startup_status"].casefold() == "running"
+        and item["workspace_dir"]
+    ]
+    unavailable_agents = [item for item in agents if item not in ready_agents]
+    git_available = shutil.which("git") is not None
+    github_cli_available = shutil.which("gh") is not None
+    github_token_available = bool(
+        os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    )
+    return {
+        "available": git_available,
+        "unsafe_execution_enabled": research_module.unsafe_research_enabled(),
+        "delivery_modes": ["local", "draft_pr"],
+        "default_delivery_mode": "local",
+        "automatic_merge": False,
+        "git_available": git_available,
+        "github_cli_available": github_cli_available,
+        "github_token_available": github_token_available,
+        "remote_delivery_available": (
+            git_available and (github_cli_available or github_token_available)
+        ),
+        "agents": ready_agents,
+        "unavailable_agents": unavailable_agents,
+    }
+
+
 def install_research_campaign_direct_service(
     research_module: ModuleType,
 ) -> None:
@@ -182,41 +219,7 @@ def install_research_campaign_direct_service(
     @research_module.router.get("/campaigns-info")
     async def campaign_info() -> dict[str, Any]:
         data = await asyncio.to_thread(list_agents_data)
-        raw_agents = data.get("agents", []) if isinstance(data, dict) else []
-        agents = [
-            _agent_payload(item)
-            for item in raw_agents
-            if isinstance(item, dict) and str(item.get("id", "")).strip()
-        ]
-        ready_agents = [
-            item
-            for item in agents
-            if item["enabled"]
-            and item["startup_status"].casefold() == "running"
-            and item["workspace_dir"]
-        ]
-        unavailable_agents = [item for item in agents if item not in ready_agents]
-        git_available = shutil.which("git") is not None
-        github_cli_available = shutil.which("gh") is not None
-        github_token_available = bool(
-            os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-        )
-        return {
-            "available": git_available,
-            "unsafe_execution_enabled": research_module.unsafe_research_enabled(),
-            "delivery_modes": ["local", "draft_pr"],
-            "default_delivery_mode": "local",
-            "automatic_merge": False,
-            "git_available": git_available,
-            "github_cli_available": github_cli_available,
-            "github_token_available": github_token_available,
-            "remote_delivery_available": (
-                git_available
-                and (github_cli_available or github_token_available)
-            ),
-            "agents": ready_agents,
-            "unavailable_agents": unavailable_agents,
-        }
+        return _runtime_info(research_module, data)
 
     @research_module.router.post("/campaigns/run", status_code=202)
     async def run_issue_campaign(
@@ -235,6 +238,45 @@ def install_research_campaign_direct_service(
             raise HTTPException(
                 status_code=422,
                 detail="implementer and reviewer agents must be different",
+            )
+        readiness = _runtime_info(
+            research_module,
+            await asyncio.to_thread(list_agents_data),
+        )
+        if not readiness["git_available"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Issue Campaign execution requires Git on the server",
+            )
+        ready_agent_ids = {
+            str(item["id"]) for item in readiness["agents"]
+        }
+        missing_agents = [
+            agent_id
+            for agent_id in (
+                body.implementer_agent_id,
+                body.reviewer_agent_id,
+            )
+            if agent_id not in ready_agent_ids
+        ]
+        if missing_agents:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Campaign agents are missing, not running, disabled, or "
+                    "lack workspaces: " + ", ".join(missing_agents)
+                ),
+            )
+        if (
+            body.delivery_mode == "draft_pr"
+            and not readiness["remote_delivery_available"]
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Draft PR delivery requires authenticated gh CLI or "
+                    "GITHUB_TOKEN/GH_TOKEN on the server"
+                ),
             )
 
         campaign_id = uuid.uuid4().hex
