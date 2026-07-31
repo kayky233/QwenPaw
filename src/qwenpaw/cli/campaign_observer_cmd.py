@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Read-only CLI commands for Campaign history and reconnecting waits."""
+"""Read-only CLI commands for Campaign history and delivery observation."""
 
 from __future__ import annotations
 
@@ -105,4 +105,38 @@ def campaign_watch_cmd(
     if result.state.get("status") != "delivered":
         raise click.ClickException(
             "Campaign did not reach delivered; inspect the generated report"
+        )
+
+
+@click.command("campaign-refresh")
+@click.argument("campaign_id")
+@click.option("--api-url", default=None)
+@click.option("--agent-id", default="default", show_default=True)
+@click.option(
+    "--report",
+    default="campaign-result.json",
+    show_default=True,
+    type=click.Path(path_type=Path),
+)
+@click.pass_context
+def campaign_refresh_cmd(
+    ctx: click.Context,
+    campaign_id: str,
+    api_url: str | None,
+    agent_id: str,
+    report: Path,
+) -> None:
+    """Refresh one Draft PR Campaign's CI and review evidence."""
+
+    try:
+        state = _client(ctx, api_url, agent_id).refresh_delivery(campaign_id)
+        json_path, markdown_path = write_campaign_report(state, report)
+    except (CampaignApiError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"JSON report: {json_path}")
+    click.echo(f"Markdown report: {markdown_path}")
+    click.echo(json.dumps(state, ensure_ascii=False, indent=2))
+    if state.get("status") == "needs_revision":
+        raise click.ClickException(
+            "Draft PR delivery needs revision; inspect the generated report"
         )
