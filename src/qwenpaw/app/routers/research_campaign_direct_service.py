@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -46,6 +48,20 @@ class RunIssueCampaignRequest(BaseModel):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _agent_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id", "")),
+        "workspace_dir": str(
+            item.get("workspace_dir")
+            or item.get("workspace")
+            or item.get("working_dir")
+            or ""
+        ),
+        "enabled": bool(item.get("enabled", True)),
+        "startup_status": str(item.get("startup_status") or "unknown"),
+    }
 
 
 def install_research_campaign_direct_service(
@@ -166,26 +182,40 @@ def install_research_campaign_direct_service(
     @research_module.router.get("/campaigns-info")
     async def campaign_info() -> dict[str, Any]:
         data = await asyncio.to_thread(list_agents_data)
-        agents = data.get("agents", []) if isinstance(data, dict) else []
+        raw_agents = data.get("agents", []) if isinstance(data, dict) else []
+        agents = [
+            _agent_payload(item)
+            for item in raw_agents
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        ]
+        ready_agents = [
+            item
+            for item in agents
+            if item["enabled"]
+            and item["startup_status"].casefold() == "running"
+            and item["workspace_dir"]
+        ]
+        unavailable_agents = [item for item in agents if item not in ready_agents]
+        git_available = shutil.which("git") is not None
+        github_cli_available = shutil.which("gh") is not None
+        github_token_available = bool(
+            os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        )
         return {
-            "available": True,
+            "available": git_available,
             "unsafe_execution_enabled": research_module.unsafe_research_enabled(),
             "delivery_modes": ["local", "draft_pr"],
             "default_delivery_mode": "local",
             "automatic_merge": False,
-            "agents": [
-                {
-                    "id": str(item.get("id", "")),
-                    "workspace_dir": str(
-                        item.get("workspace_dir")
-                        or item.get("workspace")
-                        or item.get("working_dir")
-                        or ""
-                    ),
-                }
-                for item in agents
-                if isinstance(item, dict) and str(item.get("id", "")).strip()
-            ],
+            "git_available": git_available,
+            "github_cli_available": github_cli_available,
+            "github_token_available": github_token_available,
+            "remote_delivery_available": (
+                git_available
+                and (github_cli_available or github_token_available)
+            ),
+            "agents": ready_agents,
+            "unavailable_agents": unavailable_agents,
         }
 
     @research_module.router.post("/campaigns/run", status_code=202)
