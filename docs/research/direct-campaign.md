@@ -65,7 +65,13 @@ campaign-result.md
 ```
 
 The final report contains the worktree, branch, commit, delivery receipt,
-verified artifacts, and any blocking error.
+verified artifacts, CI/review lifecycle when applicable, and any blocking
+error.
+
+`--allow` and `--check` remain explicit by design. Automatically granting file
+scope or executing model-generated commands would weaken the Campaign security
+boundary. Every writable path and validation command must therefore be approved
+by the operator.
 
 ## 3. Reuse a Campaign manifest
 
@@ -93,20 +99,47 @@ A generated manifest may be incomplete when no `--allow` or `--check` options
 are supplied. Edit `modifiable_files` and `commands` before running it. This is
 intentional: Campaign scope and validation must be explicitly approved.
 
-## 4. Resume or cancel
+A complete example is available at:
+
+```text
+docs/research/campaign.example.json
+```
+
+## 4. Disconnect, reconnect, list, or cancel
 
 The server persists Campaign state. The CLI can disconnect without terminating
 the task.
 
+Read one state:
+
 ```bash
 qwenpaw campaign status CAMPAIGN_ID
+```
+
+Reconnect, continue waiting, replay events, and regenerate the report:
+
+```bash
+qwenpaw campaign-watch CAMPAIGN_ID \
+  --report recovered-result.json
+```
+
+List recent owner-scoped runs:
+
+```bash
+qwenpaw campaign-history
+qwenpaw campaign-history --status failed --limit 50
+```
+
+Cancel an active run:
+
+```bash
 qwenpaw campaign cancel CAMPAIGN_ID
 ```
 
-The status command can also regenerate a report:
+The status command can also regenerate a report without waiting:
 
 ```bash
-qwenpaw campaign status CAMPAIGN_ID --report recovered-result.json
+qwenpaw campaign status CAMPAIGN_ID --report current-result.json
 ```
 
 ## 5. Use a verified local result
@@ -160,13 +193,36 @@ This mode performs the same host verification, then commits, pushes the
 Campaign branch, and creates a Draft Pull Request. It does not merge the Pull
 Request and does not enable auto-merge.
 
+The command monitors the verified PR head, CI checks, and review decision. The
+report records one of:
+
+```text
+ci_waiting
+review_waiting
+needs_revision
+merge_ready
+monitor_unavailable
+```
+
+`merge_ready` is evidence only. The Pull Request remains Draft unless a human
+uses the separately guarded promotion command, and no AutoResearch module
+contains a merge operation.
+
+If CI was still pending when the initial monitoring window ended, refresh it
+without modifying the PR:
+
+```bash
+qwenpaw campaign-refresh CAMPAIGN_ID \
+  --report campaign-result.json
+```
+
 The separate `remote-e2e`, `promote-ready`, and `cleanup-e2e` commands remain
 available for dedicated test-repository validation. They are not required for
 normal direct Campaign use.
 
 ## Campaign phases
 
-A normal run emits phases such as:
+A normal local run emits phases such as:
 
 ```text
 accepted
@@ -179,6 +235,16 @@ reviewed
 delivered
 ```
 
+Draft PR delivery may additionally emit:
+
+```text
+ci_waiting
+review_waiting
+needs_revision
+merge_ready
+monitor_unavailable
+```
+
 Terminal failure states are:
 
 ```text
@@ -189,4 +255,5 @@ cancelled
 ```
 
 A non-delivered result still writes a report so the exact failed command,
-review finding, scope violation, or missing evidence can be inspected.
+review finding, scope violation, missing evidence, CI failure, or review blocker
+can be inspected.
