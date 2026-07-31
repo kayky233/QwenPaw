@@ -229,14 +229,19 @@ class GitWorktreeCampaignPublisher:
         *,
         remote: str = "origin",
         push: bool = True,
+        change_request_head: str | None = None,
     ) -> None:
         if not branch.strip():
             raise ValueError("campaign branch is required")
+        request_head = (change_request_head or branch).strip()
+        if not request_head:
+            raise ValueError("change request head is required")
         self.worktree = worktree.resolve()
         self.branch = branch
         self.git = git
         self.remote = remote
         self.push = push
+        self.change_request_head = request_head
 
     async def publish(
         self,
@@ -330,7 +335,8 @@ class GitWorktreeCampaignPublisher:
             verified=True,
             metadata={
                 "commit_sha": commit_sha,
-                "head_branch": self.branch,
+                "head_branch": self.change_request_head,
+                "local_branch": self.branch,
                 "tree_revision": checkpoint.tree_revision,
                 "candidate_id": checkpoint.candidate_id,
                 "pushed": self.push,
@@ -339,7 +345,7 @@ class GitWorktreeCampaignPublisher:
         )
         publication = CampaignPublication(
             commit_sha=commit_sha,
-            head_branch=self.branch,
+            head_branch=self.change_request_head,
             artifact=artifact,
         )
         publication.validate(episode.run_id)
