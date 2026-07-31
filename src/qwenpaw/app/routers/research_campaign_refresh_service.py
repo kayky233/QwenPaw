@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -73,7 +74,7 @@ def install_research_campaign_refresh_service(
         ):
             try:
                 queue.put_nowait(state.events[-1])
-            except Exception:
+            except asyncio.QueueFull:
                 continue
 
     @research_module.router.post(
@@ -115,6 +116,12 @@ def install_research_campaign_refresh_service(
                 detail="Campaign worktree is unavailable for refresh",
             )
 
+        previous_lifecycle = outcome.get("delivery_lifecycle")
+        previous_reason = (
+            str(previous_lifecycle.get("reason") or "")
+            if isinstance(previous_lifecycle, dict)
+            else ""
+        )
         lifecycle = await _monitor_delivery(
             research_module,
             repository=state.repository,
@@ -130,8 +137,10 @@ def install_research_campaign_refresh_service(
         if lifecycle["status"] == "needs_revision":
             state.status = "needs_revision"
             state.error = str(lifecycle["reason"])
-        elif state.status == "needs_revision" and state.error == str(
-            lifecycle.get("reason", "")
+        elif (
+            state.status == "needs_revision"
+            and previous_reason
+            and state.error == previous_reason
         ):
             state.status = "delivered"
             state.error = ""
