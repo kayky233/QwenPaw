@@ -198,6 +198,11 @@ def _looks_like_project_path(value: str) -> bool:
             "campaign_refresh_cmd",
             ".campaign_observer_cmd",
         ),
+        "campaign-setup": (
+            "qwenpaw.cli.campaign_setup_cmd",
+            "campaign_setup_cmd",
+            ".campaign_setup_cmd",
+        ),
         "doctor": ("qwenpaw.cli.doctor_cmd", "doctor_cmd", ".doctor_cmd"),
         "auto": ("qwenpaw.cli.auto", "auto_group", ".auto"),
     },
