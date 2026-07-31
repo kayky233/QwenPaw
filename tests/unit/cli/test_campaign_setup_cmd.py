@@ -19,8 +19,9 @@ class _Response:
 
 
 class _Client:
-    def __init__(self, existing=()) -> None:
-        self.existing = existing
+    def __init__(self, existing=(), *, startup_status="running") -> None:
+        self.existing = set(existing)
+        self.startup_status = startup_status
         self.created = []
 
     def __enter__(self):
@@ -34,8 +35,12 @@ class _Client:
         return _Response(
             {
                 "agents": [
-                    {"id": item, "workspace_dir": f"/tmp/{item}"}
-                    for item in self.existing
+                    {
+                        "id": item,
+                        "workspace_dir": f"/tmp/{item}",
+                        "startup_status": self.startup_status,
+                    }
+                    for item in sorted(self.existing)
                 ]
             }
         )
@@ -43,6 +48,7 @@ class _Client:
     def post(self, path, *, json):
         assert path == "/agents"
         self.created.append(json)
+        self.existing.add(json["id"])
         return _Response(
             {
                 "id": json["id"],
@@ -52,7 +58,10 @@ class _Client:
         )
 
 
-def test_setup_creates_separate_campaign_agents(monkeypatch, tmp_path) -> None:
+def test_setup_creates_separate_running_campaign_agents(
+    monkeypatch,
+    tmp_path,
+) -> None:
     client = _Client()
     monkeypatch.setattr(
         module,
@@ -69,6 +78,8 @@ def test_setup_creates_separate_campaign_agents(monkeypatch, tmp_path) -> None:
             "reviewer",
             "--workspace-root",
             str(tmp_path),
+            "--poll-interval",
+            "0.1",
         ],
     )
 
@@ -77,6 +88,7 @@ def test_setup_creates_separate_campaign_agents(monkeypatch, tmp_path) -> None:
     assert client.created[0]["workspace_dir"].endswith("/coder")
     assert client.created[1]["workspace_dir"].endswith("/reviewer")
     assert '"ready": true' in result.output
+    assert '"startup_status": "running"' in result.output
 
 
 def test_setup_does_not_overwrite_existing_agents(monkeypatch) -> None:
@@ -95,6 +107,26 @@ def test_setup_does_not_overwrite_existing_agents(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert client.created == []
     assert '"skipped_existing"' in result.output
+
+
+def test_setup_fails_when_agent_startup_failed(monkeypatch) -> None:
+    client = _Client(
+        existing=("coder", "reviewer"),
+        startup_status="failed",
+    )
+    monkeypatch.setattr(
+        module,
+        "create_agent_api_client",
+        lambda _: client,
+    )
+
+    result = CliRunner().invoke(
+        module.campaign_setup_cmd,
+        ["--implementer", "coder", "--reviewer", "reviewer"],
+    )
+
+    assert result.exit_code != 0
+    assert "startup failed" in result.output
 
 
 def test_setup_rejects_self_review() -> None:
