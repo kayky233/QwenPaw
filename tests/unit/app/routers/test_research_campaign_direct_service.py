@@ -118,7 +118,7 @@ async def test_direct_run_defaults_to_local_delivery_and_persists_state(
 
 
 @pytest.mark.asyncio
-async def test_campaign_info_exposes_agents_and_disables_auto_merge(
+async def test_campaign_info_exposes_only_running_agents_and_capabilities(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -128,15 +128,37 @@ async def test_campaign_info_exposes_agents_and_disables_auto_merge(
         "list_agents_data",
         lambda: {
             "agents": [
-                {"id": "coder", "workspace_dir": "/tmp/coder"},
-                {"id": "reviewer", "workspace_dir": "/tmp/reviewer"},
+                {
+                    "id": "coder",
+                    "workspace_dir": "/tmp/coder",
+                    "enabled": True,
+                    "startup_status": "running",
+                },
+                {
+                    "id": "reviewer",
+                    "workspace_dir": "/tmp/reviewer",
+                    "enabled": True,
+                    "startup_status": "running",
+                },
+                {
+                    "id": "failed-reviewer",
+                    "workspace_dir": "/tmp/failed",
+                    "enabled": True,
+                    "startup_status": "failed",
+                },
             ]
         },
     )
+    monkeypatch.setattr(service.shutil, "which", lambda name: f"/usr/bin/{name}")
     service.install_research_campaign_direct_service(module)
 
     payload = await _endpoint(module, "/campaigns-info", "GET")()
 
+    assert payload["available"] is True
     assert payload["default_delivery_mode"] == "local"
     assert payload["automatic_merge"] is False
+    assert payload["remote_delivery_available"] is True
     assert [item["id"] for item in payload["agents"]] == ["coder", "reviewer"]
+    assert [item["id"] for item in payload["unavailable_agents"]] == [
+        "failed-reviewer"
+    ]
