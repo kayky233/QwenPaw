@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Awaitable, Callable
@@ -351,6 +355,66 @@ async def prepare_research_worktree(
     return worktree, branch, upstream_repository, push_repository
 
 
+def _checkpoint_campaign_worktree(
+    research_module: ModuleType,
+    dialog: Any,
+    result: tuple[Path, str, str, str],
+) -> None:
+    runs = getattr(research_module, "_campaign_runs", None)
+    root = getattr(research_module, "_campaign_snapshot_root", None)
+    queues = getattr(research_module, "_campaign_sse_queues", None)
+    if not isinstance(runs, dict) or root is None:
+        return
+    plan_id = str(getattr(dialog, "plan_id", ""))
+    state = runs.get(plan_id)
+    if state is None:
+        return
+    worktree, branch, upstream_repository, push_repository = result
+    context = research_module._dialog_runtime_context.get(plan_id, {})
+    base_branch = str(context.get("base_branch") or "")
+    changed = (
+        state.worktree_path != str(worktree)
+        or state.branch != branch
+        or state.base_branch != base_branch
+    )
+    state.worktree_path = str(worktree)
+    state.branch = branch
+    state.base_branch = base_branch
+    state.updated_at = datetime.now(timezone.utc).isoformat()
+    if changed:
+        event = {
+            "phase": "worktree_ready",
+            "detail": (
+                f"worktree={worktree}; branch={branch}; "
+                f"upstream={upstream_repository}; push={push_repository}; "
+                f"base={base_branch}"
+            ),
+            "timestamp": state.updated_at,
+            "sequence": len(state.events) + 1,
+        }
+        state.events.append(event)
+        if isinstance(queues, dict):
+            for queue in tuple(queues.get(plan_id, ())):
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    continue
+    snapshot_root = Path(root)
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    target = snapshot_root / f"{plan_id}.json"
+    temporary = target.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(
+            asdict(state),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+
+
 def install_research_worktree_service(
     research_module: ModuleType,
 ) -> None:
@@ -363,7 +427,7 @@ def install_research_worktree_service(
                 {},
             )
         )
-        return await prepare_research_worktree(
+        result = await prepare_research_worktree(
             dialog,
             package_root=(
                 Path(research_module.__file__).resolve().parents[4]
@@ -376,6 +440,8 @@ def install_research_worktree_service(
                 research_module._github_remote_identity
             ),
         )
+        _checkpoint_campaign_worktree(research_module, dialog, result)
+        return result
 
     research_module._validate_git_branch_name = (
         validate_git_branch_name
