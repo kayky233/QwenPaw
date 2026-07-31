@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -15,6 +16,8 @@ from ...research_ledger.github_delivery_monitor import (
 )
 from ...research_ledger.issue_campaign import IssueCampaignStatus
 from . import research_campaign_direct_service as direct_service
+
+EmitCampaignEvent = Callable[[str, str], None]
 
 
 def _checks_payload(checks: tuple[Any, ...]) -> list[dict[str, str]]:
@@ -38,14 +41,18 @@ async def _monitor_delivery(
     worktree: Path,
     attempts: int = 10,
     interval_seconds: float = 30.0,
+    emit: EmitCampaignEvent | None = None,
 ) -> dict[str, Any]:
     if shutil.which("gh") is None:
-        return {
+        result = {
             "status": "monitor_unavailable",
             "reason": "GitHub CLI is not available on the QwenPaw server",
             "automatic_merge": False,
             "attempts": [],
         }
+        if emit is not None:
+            emit(str(result["status"]), str(result["reason"]))
+        return result
 
     history: list[dict[str, Any]] = []
     final_status = "ci_waiting"
@@ -72,6 +79,8 @@ async def _monitor_delivery(
                     "blockers": ["commit_sha_mismatch"],
                 }
             )
+            if emit is not None:
+                emit(final_status, reason)
             break
 
         ci_status = snapshot.ci_report.status
@@ -79,7 +88,7 @@ async def _monitor_delivery(
         blockers: list[str] = []
         if ci_status == CICheckStatus.PENDING:
             final_status = "ci_waiting"
-            reason = "CI checks are still pending"
+            reason = f"CI checks are still pending (attempt {attempt}/{attempts})"
             blockers.append("ci_pending")
         elif ci_status in {CICheckStatus.FAILED, CICheckStatus.CANCELLED}:
             final_status = "needs_revision"
@@ -110,6 +119,8 @@ async def _monitor_delivery(
                 "blockers": blockers,
             }
         )
+        if emit is not None:
+            emit(final_status, reason)
         if final_status != "ci_waiting":
             break
         if attempt < attempts:
@@ -151,13 +162,21 @@ def install_research_campaign_monitor_service(
                 "automatic_merge": False,
                 "attempts": [],
             }
+            emit = kwargs.get("emit")
+            if callable(emit):
+                emit(
+                    "monitor_unavailable",
+                    "Draft PR delivery receipt is missing",
+                )
             return result
+        emit = kwargs.get("emit")
         monitor = await _monitor_delivery(
             module,
             repository=str(body.repository),
             pr_url=outcome.delivery.url,
             commit_sha=outcome.delivery_receipt.publication.commit_sha,
             worktree=Path(result.worktree),
+            emit=emit if callable(emit) else None,
         )
         snapshots[campaign_id] = monitor
         if monitor["status"] == "needs_revision":
