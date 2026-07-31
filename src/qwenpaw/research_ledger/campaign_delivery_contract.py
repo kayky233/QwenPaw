@@ -33,6 +33,9 @@ class CampaignPublication:
         recorded = str(self.artifact.metadata.get("commit_sha", ""))
         if recorded != self.commit_sha:
             raise ValueError("campaign publication commit SHA evidence mismatch")
+        recorded_head = str(self.artifact.metadata.get("head_branch", ""))
+        if recorded_head != self.head_branch:
+            raise ValueError("campaign publication head branch evidence mismatch")
 
 
 class CampaignPublisher(Protocol):
