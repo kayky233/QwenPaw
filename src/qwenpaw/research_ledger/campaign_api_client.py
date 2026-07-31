@@ -169,6 +169,11 @@ def write_campaign_report(
         if isinstance(outcome.get("delivery"), dict)
         else {}
     )
+    lifecycle = (
+        outcome.get("delivery_lifecycle")
+        if isinstance(outcome.get("delivery_lifecycle"), dict)
+        else {}
+    )
     artifacts = outcome.get("artifacts") if isinstance(outcome, dict) else []
     artifact_rows = "\n".join(
         "| {} | {} | {} | `{}` |".format(
@@ -180,6 +185,18 @@ def write_campaign_report(
         for item in artifacts
         if isinstance(item, dict)
     ) or "| none | - | - | - |"
+    attempts = lifecycle.get("attempts", ())
+    monitor_rows = "\n".join(
+        "| {} | {} | {} | {} |".format(
+            item.get("attempt", ""),
+            item.get("status", ""),
+            item.get("review_decision", ""),
+            ", ".join(str(value) for value in item.get("blockers", ()))
+            or "none",
+        )
+        for item in attempts
+        if isinstance(item, dict)
+    ) or "| - | not_monitored | - | - |"
     markdown_path = json_path.with_suffix(".md")
     markdown_path.write_text(
         "# AutoResearch Issue Campaign\n\n"
@@ -188,11 +205,17 @@ def write_campaign_report(
         f"- Repository: `{state.get('repository', '')}`\n"
         f"- Issue: `#{state.get('issue_number', '')}`\n"
         f"- Delivery mode: `{outcome.get('delivery_mode', '')}`\n"
+        f"- Delivery lifecycle: `{lifecycle.get('status', '')}`\n"
         f"- Worktree: `{state.get('worktree_path', '')}`\n"
         f"- Branch: `{state.get('branch', '')}`\n"
         f"- Commit: `{delivery.get('commit_sha', '')}`\n"
         f"- Change request: `{delivery.get('url', '')}`\n"
         f"- Error: `{state.get('error', '')}`\n\n"
+        "## Delivery monitoring\n\n"
+        f"{lifecycle.get('reason', 'No remote delivery monitoring was required.')}\n\n"
+        "| Attempt | Status | Review decision | Blockers |\n"
+        "|---:|---|---|---|\n"
+        f"{monitor_rows}\n\n"
         "## Verified artifacts\n\n"
         "| Type | Step | Verified | SHA-256 |\n"
         "|---|---|---:|---|\n"
