@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -132,16 +131,23 @@ def doctor_cmd(
         if isinstance(item, dict)
     }
     problems: list[str] = []
+    if not info.get("available"):
+        problems.append("Campaign runtime is unavailable on the server")
+    if not info.get("git_available"):
+        problems.append("Git is unavailable on the server")
     if not info.get("unsafe_execution_enabled"):
         problems.append("server local execution opt-in is disabled")
     if implementer not in agents:
-        problems.append(f"implementer agent not found: {implementer}")
+        problems.append(f"implementer agent is not running or ready: {implementer}")
     if reviewer not in agents:
-        problems.append(f"reviewer agent not found: {reviewer}")
+        problems.append(f"reviewer agent is not running or ready: {reviewer}")
     if implementer == reviewer:
         problems.append("implementer and reviewer must be different")
-    if delivery == "draft_pr" and shutil.which("gh") is None:
-        problems.append("draft_pr delivery requires the gh CLI")
+    if delivery == "draft_pr" and not info.get("remote_delivery_available"):
+        problems.append(
+            "draft_pr delivery requires authenticated gh CLI or a GitHub token "
+            "on the QwenPaw server"
+        )
 
     click.echo(
         json.dumps(
