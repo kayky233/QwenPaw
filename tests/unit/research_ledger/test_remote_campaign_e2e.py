@@ -1,35 +1,32 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from qwenpaw.research_ledger.change_request_delivery import (
     ChangeRequest,
     ChangeRequestResult,
 )
-from qwenpaw.research_ledger.episode_package import (
-    EpisodeCommand,
-    EpisodeExpectedArtifact,
-    EpisodePackage,
-)
 from qwenpaw.research_ledger.contracts import ResearchArtifactType
-from qwenpaw.research_ledger.remote_campaign_e2e import (
-    REMOTE_CONFIRMATION,
-    RemoteE2EPolicy,
-    RemoteIssueEvidence,
-    RepositoryBoundDraftProvider if False else RemoteIssueEvidence,
-    _monitor_attempt,
-    _remote_repository,
-    _validate_remote_write,
-)
 from qwenpaw.research_ledger.delivery_lifecycle import (
     CICheck,
     CICheckStatus,
     CIReport,
 )
+from qwenpaw.research_ledger.episode_package import (
+    EpisodeCommand,
+    EpisodeExpectedArtifact,
+    EpisodePackage,
+)
 from qwenpaw.research_ledger.github_delivery_monitor import (
     GitHubDeliverySnapshot,
+)
+from qwenpaw.research_ledger.remote_campaign_e2e import (
+    REMOTE_CONFIRMATION,
+    RemoteE2EPolicy,
+    RemoteIssueEvidence,
+    _monitor_attempt,
+    _remote_repository,
+    _validate_remote_write,
 )
 
 
@@ -57,7 +54,10 @@ def _episode() -> EpisodePackage:
     )
 
 
-def _issue(*, labels: tuple[str, ...] = ("autoresearch-e2e",)) -> RemoteIssueEvidence:
+def _issue(
+    *,
+    labels: tuple[str, ...] = ("autoresearch-e2e",),
+) -> RemoteIssueEvidence:
     return RemoteIssueEvidence(
         repository="owner/e2e-repo",
         number=7,
