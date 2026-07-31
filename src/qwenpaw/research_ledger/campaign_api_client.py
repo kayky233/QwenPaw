@@ -73,6 +73,13 @@ class CampaignApiClient:
             {},
         )
 
+    def refresh_delivery(self, campaign_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/research/campaigns/{campaign_id}/refresh-delivery",
+            {},
+        )
+
     def wait(
         self,
         campaign_id: str,
