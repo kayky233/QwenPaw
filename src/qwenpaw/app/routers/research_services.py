@@ -10,6 +10,9 @@ from .research_campaign_delivery_mode_service import (
 from .research_campaign_direct_service import (
     install_research_campaign_direct_service,
 )
+from .research_campaign_history_service import (
+    install_research_campaign_history_service,
+)
 from .research_campaign_monitor_service import (
     install_research_campaign_monitor_service,
 )
@@ -79,3 +82,4 @@ def install_research_services(research_module: ModuleType) -> None:
     install_research_campaign_delivery_mode_service(research_module)
     install_research_campaign_direct_service(research_module)
     install_research_campaign_monitor_service(research_module)
+    install_research_campaign_history_service(research_module)
