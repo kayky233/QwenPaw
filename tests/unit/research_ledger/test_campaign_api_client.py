@@ -51,6 +51,26 @@ def test_client_starts_and_reads_campaign_with_agent_header() -> None:
     assert captured[0][0].get_header("X-agent-id") == "default"
 
 
+def test_client_history_uses_owner_scoped_history_endpoint() -> None:
+    captured = []
+
+    def open_request(request, *, timeout):
+        captured.append(request)
+        return _Response({"count": 0, "total_matching": 0, "items": []})
+
+    client = CampaignApiClient(
+        "http://127.0.0.1:8088/api",
+        urlopen_func=open_request,
+    )
+
+    payload = client.history(limit=5, status="failed")
+
+    assert payload["count"] == 0
+    assert captured[0].full_url.endswith(
+        "/research/campaigns-history?limit=5&status=failed"
+    )
+
+
 def test_client_wait_replays_each_event_once(monkeypatch) -> None:
     states = iter(
         [
@@ -87,7 +107,7 @@ def test_client_wait_replays_each_event_once(monkeypatch) -> None:
     assert result.state["status"] == "delivered"
 
 
-def test_report_contains_delivery_and_artifact_evidence(tmp_path: Path) -> None:
+def test_report_contains_delivery_artifacts_and_lifecycle(tmp_path: Path) -> None:
     state = {
         "campaign_id": "run-1",
         "status": "delivered",
@@ -97,10 +117,22 @@ def test_report_contains_delivery_and_artifact_evidence(tmp_path: Path) -> None:
         "branch": "autoresearch/issue-7-run1",
         "error": "",
         "outcome": {
-            "delivery_mode": "local",
+            "delivery_mode": "draft_pr",
             "delivery": {
                 "commit_sha": "a" * 40,
-                "url": "local://autoresearch/run-1/draft-change-request",
+                "url": "https://github.com/owner/repository/pull/9",
+            },
+            "delivery_lifecycle": {
+                "status": "review_waiting",
+                "reason": "CI passed and human review is still required",
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "status": "review_waiting",
+                        "review_decision": "REVIEW_REQUIRED",
+                        "blockers": ["review_required"],
+                    }
+                ],
             },
             "artifacts": [
                 {
@@ -121,6 +153,7 @@ def test_report_contains_delivery_and_artifact_evidence(tmp_path: Path) -> None:
 
     assert json.loads(json_path.read_text())["cli_elapsed_seconds"] == 1.5
     markdown = markdown_path.read_text(encoding="utf-8")
-    assert "Delivery mode: `local`" in markdown
-    assert "local://autoresearch/run-1" in markdown
+    assert "Delivery mode: `draft_pr`" in markdown
+    assert "Delivery lifecycle: `review_waiting`" in markdown
+    assert "REVIEW_REQUIRED" in markdown
     assert "code_diff" in markdown
