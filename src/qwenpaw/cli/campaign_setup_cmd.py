@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +14,10 @@ import httpx
 from ..agents.tools.agent_management import create_agent_api_client
 
 
-def _agent_ids(payload: dict[str, Any]) -> set[str]:
+def _agent_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     agents = payload.get("agents", ())
     return {
-        str(item.get("id"))
+        str(item.get("id")): item
         for item in agents
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     }
@@ -51,6 +52,52 @@ def _create_agent(
     return result if isinstance(result, dict) else {"id": agent_id}
 
 
+def _wait_for_agents(
+    client: httpx.Client,
+    agent_ids: tuple[str, ...],
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, dict[str, Any]]:
+    started = time.monotonic()
+    while True:
+        response = client.get("/agents")
+        response.raise_for_status()
+        raw = response.json()
+        agents = _agent_map(raw if isinstance(raw, dict) else {})
+        selected = {
+            agent_id: agents.get(agent_id, {"id": agent_id, "startup_status": "missing"})
+            for agent_id in agent_ids
+        }
+        statuses = {
+            agent_id: str(item.get("startup_status") or "unknown").casefold()
+            for agent_id, item in selected.items()
+        }
+        if all(status == "running" for status in statuses.values()):
+            return selected
+        failed = {
+            agent_id: status
+            for agent_id, status in statuses.items()
+            if status in {"failed", "disabled", "missing"}
+        }
+        if failed:
+            raise RuntimeError(
+                "Campaign agent startup failed: "
+                + ", ".join(
+                    f"{agent_id}={status}" for agent_id, status in failed.items()
+                )
+            )
+        if time.monotonic() - started >= timeout_seconds:
+            raise TimeoutError(
+                "Campaign agents did not become running within "
+                f"{timeout_seconds:.0f} seconds: "
+                + ", ".join(
+                    f"{agent_id}={status}" for agent_id, status in statuses.items()
+                )
+            )
+        time.sleep(poll_interval_seconds)
+
+
 @click.command("campaign-setup")
 @click.option("--api-url", default=None)
 @click.option("--implementer", default="implementer", show_default=True)
@@ -61,14 +108,18 @@ def _create_agent(
     default=None,
 )
 @click.option("--language", default=None)
+@click.option("--wait-timeout", default=120.0, type=click.FloatRange(min=1))
+@click.option("--poll-interval", default=2.0, type=click.FloatRange(min=0.1))
 def campaign_setup_cmd(
     api_url: str | None,
     implementer: str,
     reviewer: str,
     workspace_root: Path | None,
     language: str | None,
+    wait_timeout: float,
+    poll_interval: float,
 ) -> None:
-    """Create missing Campaign agents without overwriting existing profiles."""
+    """Create missing Campaign agents and wait until both are running."""
 
     if not implementer.strip() or not reviewer.strip():
         raise click.UsageError("Campaign agent IDs cannot be blank")
@@ -80,8 +131,8 @@ def campaign_setup_cmd(
             response = client.get("/agents")
             response.raise_for_status()
             raw = response.json()
-            agents = raw if isinstance(raw, dict) else {}
-            existing = _agent_ids(agents)
+            agents = _agent_map(raw if isinstance(raw, dict) else {})
+            existing = set(agents)
             created: list[dict[str, Any]] = []
             skipped: list[str] = []
             if implementer in existing:
@@ -116,6 +167,12 @@ def campaign_setup_cmd(
                         language=language,
                     )
                 )
+            ready_agents = _wait_for_agents(
+                client,
+                (implementer, reviewer),
+                timeout_seconds=wait_timeout,
+                poll_interval_seconds=poll_interval,
+            )
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text.strip()
         raise click.ClickException(
@@ -123,6 +180,8 @@ def campaign_setup_cmd(
         ) from exc
     except httpx.HTTPError as exc:
         raise click.ClickException(f"Agent API is unavailable: {exc}") from exc
+    except (RuntimeError, TimeoutError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
     click.echo(
         json.dumps(
@@ -132,6 +191,7 @@ def campaign_setup_cmd(
                 "reviewer": reviewer,
                 "created": created,
                 "skipped_existing": skipped,
+                "agents": ready_agents,
                 "next": (
                     "qwenpaw campaign doctor "
                     f"--implementer {implementer} --reviewer {reviewer}"
