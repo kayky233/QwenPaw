@@ -9,38 +9,23 @@ from qwenpaw.app.routers import research_campaign_delivery_mode_service as servi
 
 
 @pytest.mark.asyncio
-async def test_delivery_mode_preserves_existing_draft_pr_runtime() -> None:
-    remote = AsyncMock(return_value="remote-result")
-    module = SimpleNamespace(_execute_issue_campaign=remote)
-    service.install_research_campaign_delivery_mode_service(module)
-    body = SimpleNamespace(delivery_mode="draft_pr")
-
-    result = await module._execute_issue_campaign(
-        module,
-        "campaign-1",
-        body,
-        owner_agent_id="default",
-        owner_session_id=None,
-        emit=lambda *_: None,
-    )
-
-    assert result == "remote-result"
-    remote.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_local_delivery_resolves_implementer_and_uses_local_runtime(
+@pytest.mark.parametrize("mode", ["local", "draft_pr"])
+async def test_delivery_modes_resolve_workspace_and_use_unified_runtime(
+    mode: str,
     monkeypatch,
 ) -> None:
-    remote = AsyncMock()
-    module = SimpleNamespace(_execute_issue_campaign=remote)
+    module = SimpleNamespace(_execute_issue_campaign=AsyncMock())
     resolve = AsyncMock()
-    local = AsyncMock(return_value="local-result")
+    execute = AsyncMock(return_value=f"{mode}-result")
     monkeypatch.setattr(service, "_resolve_implementer_workspace", resolve)
-    monkeypatch.setattr(service, "_execute_local_issue_campaign", local)
+    monkeypatch.setattr(
+        service,
+        "_execute_issue_campaign_with_delivery",
+        execute,
+    )
     service.install_research_campaign_delivery_mode_service(module)
     body = SimpleNamespace(
-        delivery_mode="local",
+        delivery_mode=mode,
         implementer_agent_id="coder",
     )
 
@@ -53,10 +38,9 @@ async def test_local_delivery_resolves_implementer_and_uses_local_runtime(
         emit=lambda *_: None,
     )
 
-    assert result == "local-result"
+    assert result == f"{mode}-result"
     resolve.assert_awaited_once_with(module, "campaign-1", "coder")
-    local.assert_awaited_once()
-    remote.assert_not_awaited()
+    assert execute.await_args.kwargs["delivery_mode"] == mode
 
 
 @pytest.mark.asyncio
@@ -70,3 +54,16 @@ async def test_unknown_delivery_mode_is_rejected() -> None:
             "campaign-1",
             SimpleNamespace(delivery_mode="merge"),
         )
+
+
+def test_repository_parts_support_upstream_and_fork_identity() -> None:
+    assert service._repository_parts("upstream/project") == (
+        "upstream",
+        "project",
+    )
+    assert service._repository_parts("fork-owner/project") == (
+        "fork-owner",
+        "project",
+    )
+    with pytest.raises(RuntimeError, match="invalid Campaign repository"):
+        service._repository_parts("project")
