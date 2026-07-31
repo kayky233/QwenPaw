@@ -13,6 +13,9 @@ from ...research_ledger.agent_management_transport import (
     AgentManagementTaskTransport,
 )
 from ...research_ledger.campaign_delivery import CampaignChangeRequestDeliverer
+from ...research_ledger.change_request_providers import (
+    GitHubChangeRequestProvider,
+)
 from ...research_ledger.collaboration_contracts import (
     ResearchAgentRole,
     TaskEnvelope,
@@ -67,7 +70,14 @@ async def _resolve_implementer_workspace(
     context["campaign_workspace_agent_id"] = implementer_agent_id
 
 
-async def _execute_local_issue_campaign(
+def _repository_parts(repository: str) -> tuple[str, str]:
+    parts = repository.split("/", 1)
+    if len(parts) != 2 or not all(item.strip() for item in parts):
+        raise RuntimeError(f"invalid Campaign repository identity: {repository!r}")
+    return parts[0], parts[1]
+
+
+async def _execute_issue_campaign_with_delivery(
     research_module: Any,
     campaign_id: str,
     body: Any,
@@ -75,6 +85,7 @@ async def _execute_local_issue_campaign(
     owner_agent_id: str,
     owner_session_id: str | None,
     emit: Any,
+    delivery_mode: str,
 ) -> campaign_runtime.CampaignRuntimeResult:
     repository = str(body.repository)
     issue_url = f"https://github.com/{repository}/issues/{body.issue_number}"
@@ -96,12 +107,19 @@ async def _execute_local_issue_campaign(
     )
 
     emit("preparing_worktree", "Preparing isolated Git worktree")
-    worktree, branch, upstream_repository, _ = (
+    worktree, branch, upstream_repository, push_repository = (
         await research_module._prepare_research_worktree(dialog)
     )
     if upstream_repository.casefold() != repository.casefold():
         raise RuntimeError(
             "prepared worktree repository does not match campaign repository"
+        )
+    push_owner, push_name = _repository_parts(push_repository)
+    _, upstream_name = _repository_parts(upstream_repository)
+    if push_name.casefold() != upstream_name.casefold():
+        raise RuntimeError(
+            "Campaign push repository must be the upstream repository or a "
+            "same-name fork"
         )
 
     base_revision = (
@@ -118,6 +136,8 @@ async def _execute_local_issue_campaign(
     base_branch = str(runtime_context.get("base_branch") or "").strip()
     if not base_branch:
         raise RuntimeError("campaign worktree did not resolve a base branch")
+    runtime_context["campaign_upstream_repository"] = upstream_repository
+    runtime_context["campaign_push_repository"] = push_repository
 
     emit("loading_issue", f"Loading GitHub issue #{body.issue_number}")
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -185,14 +205,32 @@ async def _execute_local_issue_campaign(
         root_session_id=owner_session_id,
         emit=emit,
     )
+
+    same_repository = (
+        push_repository.casefold() == upstream_repository.casefold()
+    )
+    change_request_head = (
+        branch if same_repository else f"{push_owner}:{branch}"
+    )
+    publisher = GitWorktreeCampaignPublisher(
+        worktree,
+        branch,
+        research_module._run_process,
+        push=delivery_mode == "draft_pr",
+        change_request_head=change_request_head,
+    )
+    if delivery_mode == "local":
+        provider = LocalChangeRequestProvider(campaign_id)
+    else:
+        provider = GitHubChangeRequestProvider(
+            campaign_runtime._GitHubChangeRequestClient(
+                environment=os.environ,
+                urlopen_func=research_module.urlopen,
+            )
+        )
     deliverer = CampaignChangeRequestDeliverer(
-        LocalChangeRequestProvider(campaign_id),
-        GitWorktreeCampaignPublisher(
-            worktree,
-            branch,
-            research_module._run_process,
-            push=False,
-        ),
+        provider,
+        publisher,
         base_branch=base_branch,
         draft=True,
     )
@@ -218,12 +256,18 @@ async def _execute_local_issue_campaign(
         frozen_files=tuple(body.frozen_files),
         environment={
             "worktree": str(worktree),
-            "delivery_mode": "local",
+            "delivery_mode": delivery_mode,
+            "upstream_repository": upstream_repository,
+            "push_repository": push_repository,
+            "change_request_head": change_request_head,
         },
         max_attempts=int(body.max_attempts),
         modifiable_files=tuple(body.modifiable_files),
     )
-    emit("running", "Starting bounded local-delivery Issue Campaign")
+    emit(
+        "running",
+        f"Starting bounded {delivery_mode} Issue Campaign",
+    )
     outcome = await IssueCampaignRunner(
         campaign_runtime._PreparedIssueService(prepared),
         LocalSubprocessRunner(),
@@ -244,11 +288,10 @@ async def _execute_local_issue_campaign(
 def install_research_campaign_delivery_mode_service(
     research_module: ModuleType,
 ) -> None:
-    """Add safe local delivery while preserving the Draft PR implementation."""
+    """Install local and Draft PR delivery, including safe Fork PR heads."""
 
     if getattr(research_module, "_campaign_delivery_mode_installed", False):
         return
-    execute_remote = research_module._execute_issue_campaign
 
     async def execute_with_delivery_mode(
         module: Any,
@@ -257,19 +300,18 @@ def install_research_campaign_delivery_mode_service(
         **kwargs: Any,
     ) -> campaign_runtime.CampaignRuntimeResult:
         mode = str(getattr(body, "delivery_mode", "draft_pr")).strip()
-        if mode == "draft_pr":
-            return await execute_remote(module, campaign_id, body, **kwargs)
-        if mode != "local":
+        if mode not in {"local", "draft_pr"}:
             raise ValueError(f"unsupported Campaign delivery mode: {mode!r}")
         await _resolve_implementer_workspace(
             module,
             campaign_id,
             str(body.implementer_agent_id),
         )
-        return await _execute_local_issue_campaign(
+        return await _execute_issue_campaign_with_delivery(
             module,
             campaign_id,
             body,
+            delivery_mode=mode,
             **kwargs,
         )
 
