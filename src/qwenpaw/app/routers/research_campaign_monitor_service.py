@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -12,6 +13,7 @@ from ...research_ledger.delivery_lifecycle import CICheckStatus
 from ...research_ledger.github_delivery_monitor import (
     fetch_github_delivery_snapshot,
 )
+from ...research_ledger.issue_campaign import IssueCampaignStatus
 from . import research_campaign_direct_service as direct_service
 
 
@@ -150,13 +152,23 @@ def install_research_campaign_monitor_service(
                 "attempts": [],
             }
             return result
-        snapshots[campaign_id] = await _monitor_delivery(
+        monitor = await _monitor_delivery(
             module,
             repository=str(body.repository),
             pr_url=outcome.delivery.url,
             commit_sha=outcome.delivery_receipt.publication.commit_sha,
             worktree=Path(result.worktree),
         )
+        snapshots[campaign_id] = monitor
+        if monitor["status"] == "needs_revision":
+            return replace(
+                result,
+                outcome=replace(
+                    outcome,
+                    status=IssueCampaignStatus.NEEDS_REVISION,
+                    reason=str(monitor["reason"]),
+                ),
+            )
         return result
 
     base_outcome_payload = direct_service._outcome_payload
