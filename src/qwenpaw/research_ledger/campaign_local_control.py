@@ -103,6 +103,14 @@ def _origin_repository(repository: Path) -> str:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
+def _same_repository_or_fork(expected: str, actual: str) -> bool:
+    expected_parts = expected.casefold().split("/", 1)
+    actual_parts = actual.casefold().split("/", 1)
+    if len(expected_parts) != 2 or len(actual_parts) != 2:
+        return False
+    return expected_parts == actual_parts or expected_parts[1] == actual_parts[1]
+
+
 def apply_local_campaign_patch(
     state: dict[str, Any],
     repository: Path,
@@ -120,8 +128,11 @@ def apply_local_campaign_patch(
     if _run(repository, "git", "status", "--porcelain"):
         raise RuntimeError("target repository must be clean before apply")
     expected_repository = str(state.get("repository", ""))
-    if _origin_repository(repository).casefold() != expected_repository.casefold():
-        raise RuntimeError("target origin does not match the Campaign repository")
+    actual_repository = _origin_repository(repository)
+    if not _same_repository_or_fork(expected_repository, actual_repository):
+        raise RuntimeError(
+            "target origin is neither the Campaign repository nor a same-name fork"
+        )
 
     artifact = _code_diff(outcome)
     metadata = artifact.get("metadata")
@@ -168,7 +179,7 @@ def apply_local_campaign_patch(
         ).splitlines()
         if item
     )
-    if staged_paths != changed_paths:
+    if sorted(staged_paths) != sorted(changed_paths):
         raise RuntimeError(
             "staged paths do not match verified Campaign paths: "
             f"{staged_paths!r} != {changed_paths!r}"
