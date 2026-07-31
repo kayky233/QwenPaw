@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 _TERMINAL = {"delivered", "needs_revision", "blocked", "failed", "cancelled"}
@@ -42,6 +43,22 @@ class CampaignApiClient:
 
     def info(self) -> dict[str, Any]:
         return self._request("GET", "/research/campaigns-info")
+
+    def history(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        if limit < 1 or limit > 200:
+            raise ValueError("Campaign history limit must be between 1 and 200")
+        query: dict[str, str | int] = {"limit": limit}
+        if status:
+            query["status"] = status
+        return self._request(
+            "GET",
+            "/research/campaigns-history?" + urlencode(query),
+        )
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/research/campaigns/run", payload)
