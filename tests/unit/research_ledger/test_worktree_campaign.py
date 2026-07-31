@@ -152,14 +152,20 @@ async def test_worktree_publisher_commits_exact_validated_tree(tmp_path):
         branch,
         _git,
         push=False,
+        change_request_head=f"fork-owner:{branch}",
     )
 
     publication = await publisher.publish(episode, candidate.checkpoint)
 
     assert publication.commit_sha == _run(repo, "git", "rev-parse", "HEAD")
     assert publication.commit_sha != base_revision
+    assert publication.head_branch == f"fork-owner:{branch}"
     assert publication.artifact.artifact_type == ResearchArtifactType.COMMIT
     assert publication.artifact.metadata["commit_sha"] == publication.commit_sha
+    assert publication.artifact.metadata["head_branch"] == (
+        f"fork-owner:{branch}"
+    )
+    assert publication.artifact.metadata["local_branch"] == branch
     assert publication.artifact.metadata["tree_revision"] == (
         candidate.checkpoint.tree_revision
     )
