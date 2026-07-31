@@ -22,8 +22,12 @@ def _run(repository: Path, *argv: str) -> str:
     return completed.stdout.strip()
 
 
-def _repository(tmp_path: Path) -> tuple[Path, str]:
-    repository = tmp_path / "repository"
+def _repository(
+    tmp_path: Path,
+    *,
+    owner: str = "owner",
+) -> tuple[Path, str]:
+    repository = tmp_path / f"repository-{owner}"
     repository.mkdir()
     _run(repository, "git", "init")
     _run(repository, "git", "config", "user.name", "Test User")
@@ -34,7 +38,7 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
         "remote",
         "add",
         "origin",
-        "https://github.com/owner/repository.git",
+        f"https://github.com/{owner}/repository.git",
     )
     source = repository / "src" / "fix.py"
     source.parent.mkdir(parents=True)
@@ -79,16 +83,20 @@ def _state(
     }
 
 
-def test_apply_local_campaign_stages_verified_patch(tmp_path: Path) -> None:
-    repository, head = _repository(tmp_path)
+def _candidate_patch(repository: Path, target: Path) -> None:
     source = repository / "src" / "fix.py"
     source.write_text("VALUE = 2\n", encoding="utf-8")
-    patch_path = tmp_path / "candidate.patch"
-    patch_path.write_text(
+    target.write_text(
         _run(repository, "git", "diff", "--binary"),
         encoding="utf-8",
     )
     _run(repository, "git", "checkout", "--", "src/fix.py")
+
+
+def test_apply_local_campaign_stages_verified_patch(tmp_path: Path) -> None:
+    repository, head = _repository(tmp_path)
+    patch_path = tmp_path / "candidate.patch"
+    _candidate_patch(repository, patch_path)
 
     result = apply_local_campaign_patch(
         _state(tmp_path, parent_revision=head, patch_path=patch_path),
@@ -98,6 +106,23 @@ def test_apply_local_campaign_stages_verified_patch(tmp_path: Path) -> None:
 
     assert result.staged is True
     assert result.committed is False
+    assert _run(repository, "git", "diff", "--cached", "--name-only") == (
+        "src/fix.py"
+    )
+
+
+def test_apply_local_campaign_accepts_same_name_fork(tmp_path: Path) -> None:
+    repository, head = _repository(tmp_path, owner="fork-owner")
+    patch_path = tmp_path / "fork-candidate.patch"
+    _candidate_patch(repository, patch_path)
+
+    result = apply_local_campaign_patch(
+        _state(tmp_path, parent_revision=head, patch_path=patch_path),
+        repository,
+        confirmation=APPLY_CONFIRMATION,
+    )
+
+    assert result.staged is True
     assert _run(repository, "git", "diff", "--cached", "--name-only") == (
         "src/fix.py"
     )
