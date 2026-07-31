@@ -1,0 +1,36 @@
+{
+  "acceptance_criteria": [
+    "The reported regression is fixed.",
+    "Existing behavior remains compatible."
+  ],
+  "commands": [
+    {
+      "argv": [
+        "pytest",
+        "-q",
+        "tests/test_fix.py"
+      ],
+      "command_id": "focused-tests",
+      "cwd": ".",
+      "required": true,
+      "stage": "unit",
+      "timeout_seconds": 300.0
+    }
+  ],
+  "delivery_mode": "local",
+  "frozen_files": [
+    "pyproject.toml"
+  ],
+  "implementer_agent_id": "implementer",
+  "issue_url": "https://github.com/owner/repository/issues/123",
+  "max_attempts": 3,
+  "metadata": {},
+  "modifiable_files": [
+    "src/package/fix.py",
+    "tests/test_fix.py"
+  ],
+  "reviewer_agent_id": "reviewer",
+  "schema_version": 1,
+  "session_id": null,
+  "task_type": "bug_fix"
+}
