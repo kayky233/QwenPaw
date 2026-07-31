@@ -18,10 +18,17 @@ export QWENPAW_UNSAFE_RESEARCH=1
 qwenpaw app
 ```
 
-Configure two different agents before running a Campaign:
+Create the two isolated Campaign agents once:
 
-- an Implementer with a writable workspace;
-- a Reviewer with a separate identity.
+```bash
+qwenpaw campaign-setup \
+  --implementer implementer \
+  --reviewer reviewer
+```
+
+The setup command creates only missing profiles, never overwrites existing
+agents, gives each role an independent workspace, and reuses the globally
+selected model when no model override is supplied.
 
 Check the complete runtime before starting:
 
@@ -156,7 +163,7 @@ qwenpaw campaign-local apply CAMPAIGN_ID \
 Before applying, the command checks:
 
 - the Campaign completed in local mode;
-- the target origin matches the Campaign repository;
+- the target origin is the Issue repository or a same-name GitHub Fork;
 - the target repository is clean;
 - the target HEAD matches the verified parent revision;
 - the Patch exists;
@@ -180,7 +187,7 @@ Select remote delivery explicitly:
 
 ```bash
 qwenpaw campaign run \
-  https://github.com/owner/repository/issues/123 \
+  https://github.com/upstream/repository/issues/123 \
   --allow src/package/fix.py \
   --allow tests/test_fix.py \
   --check "pytest -q tests/test_fix.py" \
@@ -192,6 +199,19 @@ qwenpaw campaign run \
 This mode performs the same host verification, then commits, pushes the
 Campaign branch, and creates a Draft Pull Request. It does not merge the Pull
 Request and does not enable auto-merge.
+
+Both normal repository and Fork workflows are supported:
+
+```text
+Issue repository: upstream/repository
+origin:           upstream/repository  -> head autoresearch/issue-...
+origin:           my-user/repository   -> head my-user:autoresearch/issue-...
+```
+
+A Fork must have the same repository name as the Issue repository. The branch
+is pushed only to the resolved `origin`; the Draft Pull Request target remains
+the Issue repository. The delivery receipt verifies both Commit SHA and exact
+PR Head identity.
 
 The command monitors the verified PR head, CI checks, and review decision. The
 report records one of:
