@@ -13,6 +13,7 @@ from ...research_ledger.agent_management_transport import (
     AgentManagementTaskTransport,
 )
 from ...research_ledger.campaign_delivery import CampaignChangeRequestDeliverer
+from ...research_ledger.change_request_delivery import ChangeRequestProvider
 from ...research_ledger.change_request_providers import (
     GitHubChangeRequestProvider,
 )
@@ -22,6 +23,9 @@ from ...research_ledger.collaboration_contracts import (
 )
 from ...research_ledger.episode_package import EpisodeCommand, EpisodePackage
 from ...research_ledger.execution_runner import LocalSubprocessRunner
+from ...research_ledger.host_evidence_reviewer import (
+    HostEvidenceCampaignReviewer,
+)
 from ...research_ledger.issue_campaign import (
     IssueCampaignRequest,
     IssueCampaignRunner,
@@ -198,7 +202,7 @@ async def _execute_issue_campaign_with_delivery(
             / "research-campaign-artifacts"
         ),
     )
-    reviewer = campaign_runtime._AgentReviewer(
+    reviewer = HostEvidenceCampaignReviewer(
         transport,
         str(body.reviewer_agent_id),
         from_agent=owner_agent_id,
@@ -219,6 +223,7 @@ async def _execute_issue_campaign_with_delivery(
         push=delivery_mode == "draft_pr",
         change_request_head=change_request_head,
     )
+    provider: ChangeRequestProvider
     if delivery_mode == "local":
         provider = LocalChangeRequestProvider(campaign_id)
     else:
