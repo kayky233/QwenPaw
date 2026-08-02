@@ -99,9 +99,17 @@ def hardened_runtime_info(
 def install_research_campaign_capability_service(
     research_module: ModuleType,
 ) -> None:
-    """Replace permissive capability discovery with authenticated checks."""
+    """Replace permissive capability and PR execution with authenticated checks."""
 
     if getattr(research_module, "_campaign_capability_service_installed", False):
         return
+    from . import research_campaign_runtime as campaign_runtime
+    from .research_campaign_github_client import (
+        AuthenticatedGitHubChangeRequestClient,
+    )
+
     direct_service._runtime_info = hardened_runtime_info
+    campaign_runtime._GitHubChangeRequestClient = (
+        AuthenticatedGitHubChangeRequestClient
+    )
     research_module._campaign_capability_service_installed = True
