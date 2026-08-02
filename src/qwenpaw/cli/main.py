@@ -82,12 +82,10 @@ class LazyGroup(click.Group):
 
     def get_command(self, ctx, cmd_name):
         """Get command, loading lazily if needed."""
-        # Try eager commands first
         cmd = super().get_command(ctx, cmd_name)
         if cmd is not None:
             return cmd
 
-        # Try lazy commands
         if cmd_name in self.lazy_subcommands:
             module_path, attr_name, label = self.lazy_subcommands[cmd_name]
             _t = time.perf_counter()
@@ -95,7 +93,6 @@ class LazyGroup(click.Group):
                 module = __import__(module_path, fromlist=[attr_name])
                 cmd = getattr(module, attr_name)
                 _record(label, time.perf_counter() - _t)
-                # Cache for next time
                 self.add_command(cmd, cmd_name)
                 return cmd
             except Exception as e:
@@ -198,6 +195,21 @@ def _looks_like_project_path(value: str) -> bool:
             "campaign_refresh_cmd",
             ".campaign_observer_cmd",
         ),
+        "campaign-revise": (
+            "qwenpaw.cli.campaign_observer_cmd",
+            "campaign_revise_cmd",
+            ".campaign_observer_cmd",
+        ),
+        "campaign-recovery": (
+            "qwenpaw.cli.campaign_observer_cmd",
+            "campaign_recovery_cmd",
+            ".campaign_observer_cmd",
+        ),
+        "campaign-cleanup-worktree": (
+            "qwenpaw.cli.campaign_observer_cmd",
+            "campaign_cleanup_worktree_cmd",
+            ".campaign_observer_cmd",
+        ),
         "campaign-setup": (
             "qwenpaw.cli.campaign_setup_cmd",
             "campaign_setup_cmd",
@@ -218,14 +230,12 @@ def _looks_like_project_path(value: str) -> bool:
 @click.pass_context
 def cli(ctx: click.Context, host: str | None, port: int | None) -> None:
     """QwenPaw CLI."""
-    # default from last run if not provided
     last = read_last_api()
     if host is None or port is None:
         if last:
             host = host or last[0]
             port = port or last[1]
 
-    # final fallback
     host = host or "127.0.0.1"
     port = port or 8088
 
@@ -233,10 +243,6 @@ def cli(ctx: click.Context, host: str | None, port: int | None) -> None:
     ctx.obj["host"] = host
     ctx.obj["port"] = port
 
-    # Bare ``qwenpaw`` (no subcommand) opens the interactive terminal chat UI.
-    # ``--help`` is handled by Click before this callback runs, and every other
-    # entry point is an explicit subcommand, so this only fires for a bare
-    # invocation.
     if ctx.invoked_subcommand is None:
         from .tui.launch import run_tui
 
