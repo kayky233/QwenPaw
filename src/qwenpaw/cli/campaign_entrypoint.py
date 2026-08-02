@@ -7,7 +7,10 @@ from pathlib import Path
 
 import click
 
-from ..research_ledger.campaign_api_client import write_campaign_report
+from ..research_ledger.campaign_api_client import (
+    CampaignApiError,
+    write_campaign_report,
+)
 from . import campaign_cmd as campaign_module
 from .campaign_group_extensions import install_campaign_group_extensions
 
@@ -85,7 +88,12 @@ def _install_auto_revision(group: click.Group) -> None:
                         report,
                         elapsed_seconds=result.elapsed_seconds,
                     )
-                except (OSError, TimeoutError, ValueError) as exc:
+                except (
+                    CampaignApiError,
+                    OSError,
+                    TimeoutError,
+                    ValueError,
+                ) as exc:
                     raise click.ClickException(str(exc)) from exc
                 if state.get("status") == "delivered":
                     click.echo(json.dumps(state, ensure_ascii=False))
