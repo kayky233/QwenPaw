@@ -181,10 +181,11 @@ def campaign_revise_cmd(
     state: dict[str, object] = {}
     try:
         for round_index in range(1, rounds + 1):
-            current = client.get(campaign_id)
-            if current.get("status") == "delivered":
-                state = current
-                break
+            if round_index > 1:
+                current = client.get(campaign_id)
+                if current.get("status") == "delivered":
+                    state = current
+                    break
             click.echo(f"Starting revision round {round_index}/{rounds}")
             client.revise(
                 campaign_id,
