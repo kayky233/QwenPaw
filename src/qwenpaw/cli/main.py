@@ -10,8 +10,6 @@ import click
 
 from ..utils.stdio import ensure_standard_streams
 
-# On Windows, force UTF-8 for stdout/stderr so cron and other commands
-# can handle Chinese and other non-ASCII (Linux is UTF-8 by default).
 if sys.platform == "win32":
     ensure_standard_streams()
     try:
@@ -23,7 +21,6 @@ if sys.platform == "win32":
 # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
-# Store init timings so app_cmd can re-log after setting log level to debug.
 _init_timings: list[tuple[str, float]] = []
 _t0_main = time.perf_counter()
 _init_timings.append(("main.py loaded", 0.0))
@@ -34,7 +31,6 @@ def _record(label: str, elapsed: float) -> None:
     logger.debug("%.3fs %s", elapsed, label)
 
 
-# Timed imports below: order and placement are intentional (E402/C0413).
 _t = time.perf_counter()
 from ..config.utils import read_last_api  # noqa: E402
 
@@ -66,7 +62,6 @@ class LazyGroup(click.Group):
     def parse_args(self, ctx, args):
         """Treat ``qwenpaw .`` as bare TUI launch with a project dir."""
         args = list(args)
-        # Registered commands win; otherwise path-like first tokens launch TUI.
         if (
             args
             and args[0] not in self.list_commands(ctx)
@@ -85,7 +80,6 @@ class LazyGroup(click.Group):
         cmd = super().get_command(ctx, cmd_name)
         if cmd is not None:
             return cmd
-
         if cmd_name in self.lazy_subcommands:
             module_path, attr_name, label = self.lazy_subcommands[cmd_name]
             _t = time.perf_counter()
@@ -98,7 +92,6 @@ class LazyGroup(click.Group):
             except Exception as e:
                 logger.error(f"Failed to load command '{cmd_name}': {e}")
                 return None
-
         return None
 
 
@@ -171,9 +164,9 @@ def _looks_like_project_path(value: str) -> bool:
             ".research_cmd",
         ),
         "campaign": (
-            "qwenpaw.cli.campaign_cmd",
+            "qwenpaw.cli.campaign_entrypoint",
             "campaign_cmd",
-            ".campaign_cmd",
+            ".campaign_entrypoint",
         ),
         "campaign-local": (
             "qwenpaw.cli.campaign_local_cmd",
@@ -221,12 +214,7 @@ def _looks_like_project_path(value: str) -> bool:
 )
 @click.version_option(version=__version__, prog_name="QwenPaw")
 @click.option("--host", default=None, help="API Host")
-@click.option(
-    "--port",
-    default=None,
-    type=int,
-    help="API Port",
-)
+@click.option("--port", default=None, type=int, help="API Port")
 @click.pass_context
 def cli(ctx: click.Context, host: str | None, port: int | None) -> None:
     """QwenPaw CLI."""
@@ -235,14 +223,11 @@ def cli(ctx: click.Context, host: str | None, port: int | None) -> None:
         if last:
             host = host or last[0]
             port = port or last[1]
-
     host = host or "127.0.0.1"
     port = port or 8088
-
     ctx.ensure_object(dict)
     ctx.obj["host"] = host
     ctx.obj["port"] = port
-
     if ctx.invoked_subcommand is None:
         from .tui.launch import run_tui
 
