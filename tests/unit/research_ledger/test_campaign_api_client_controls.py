@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from io import BytesIO
 
 from qwenpaw.research_ledger.campaign_api_client import CampaignApiClient
 
