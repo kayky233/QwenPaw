@@ -10,6 +10,22 @@ from typing import Any
 
 from . import research_campaign_direct_service as direct_service
 
+_GH_STATUS_ENVIRONMENT = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "GH_CONFIG_DIR",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    }
+)
+
 
 def _github_cli_authentication() -> tuple[bool, str]:
     executable = shutil.which("gh")
@@ -25,7 +41,7 @@ def _github_cli_authentication() -> tuple[bool, str]:
             env={
                 key: value
                 for key, value in os.environ.items()
-                if key in {"PATH", "HOME", "USERPROFILE", "GH_CONFIG_DIR"}
+                if key in _GH_STATUS_ENVIRONMENT
             },
         )
     except (OSError, subprocess.SubprocessError):
@@ -56,9 +72,7 @@ def hardened_runtime_info(
     unavailable_agents = [item for item in agents if item not in ready_agents]
     git_available = shutil.which("git") is not None
     github_cli_available = shutil.which("gh") is not None
-    github_cli_authenticated, github_cli_status = (
-        _github_cli_authentication()
-    )
+    github_cli_authenticated, github_cli_status = _github_cli_authentication()
     github_token_available = bool(
         os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     )
