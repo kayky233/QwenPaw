@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -58,13 +59,11 @@ def _owned(research_module: ModuleType, campaign_id: str, request: Request) -> A
 
 
 def _parse_worktree_paths(raw: str) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for line in raw.splitlines():
-        if line.startswith("worktree "):
-            value = line[len("worktree ") :].strip()
-            if value:
-                paths.append(Path(value).expanduser().resolve())
-    return tuple(paths)
+    return tuple(
+        Path(line[len("worktree ") :].strip()).expanduser().resolve()
+        for line in raw.splitlines()
+        if line.startswith("worktree ") and line[len("worktree ") :].strip()
+    )
 
 
 async def _source_root(research_module: ModuleType, worktree: Path) -> Path:
@@ -76,12 +75,15 @@ async def _source_root(research_module: ModuleType, worktree: Path) -> Path:
         )
     ).strip()
     common = Path(common_raw)
-    if not common.is_absolute():
-        common = (worktree / common).resolve()
-    else:
-        common = common.resolve()
+    common = (
+        (worktree / common).resolve()
+        if not common.is_absolute()
+        else common.resolve()
+    )
     if common.name != ".git" or not common.is_dir():
-        raise RuntimeError("Campaign worktree does not belong to a normal Git repository")
+        raise RuntimeError(
+            "Campaign worktree does not belong to a normal Git repository"
+        )
     source = common.parent.resolve()
     if not (source / ".git").is_dir():
         raise RuntimeError("Campaign source repository is unavailable")
@@ -114,7 +116,9 @@ async def _validate_identity(
         timeout=30,
     )
     if worktree not in _parse_worktree_paths(registered_raw):
-        raise RuntimeError("Campaign worktree is not registered in its source repository")
+        raise RuntimeError(
+            "Campaign worktree is not registered in its source repository"
+        )
     try:
         worktree.relative_to(source)
     except ValueError as exc:
@@ -122,6 +126,67 @@ async def _validate_identity(
             "Campaign worktree escapes its source repository; cleanup is blocked"
         ) from exc
     return worktree, source
+
+
+def _safe_untracked_path(raw: str) -> PurePosixPath:
+    normalized = raw.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or ".." in path.parts:
+        raise RuntimeError(f"unsafe untracked recovery path: {raw!r}")
+    return path
+
+
+async def _backup_untracked_files(
+    research_module: ModuleType,
+    worktree: Path,
+    root: Path,
+) -> tuple[dict[str, Any], ...]:
+    raw = await research_module._run_process(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=worktree,
+        timeout=30,
+    )
+    backup_root = root / "untracked"
+    records: list[dict[str, Any]] = []
+    for value in (item for item in raw.split("\0") if item):
+        relative = _safe_untracked_path(value)
+        source = (worktree / Path(*relative.parts)).resolve()
+        try:
+            source.relative_to(worktree)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"untracked recovery path escapes worktree: {value!r}"
+            ) from exc
+        if source.is_symlink():
+            records.append(
+                {
+                    "path": relative.as_posix(),
+                    "status": "symlink_not_copied",
+                }
+            )
+            continue
+        if not source.is_file():
+            records.append(
+                {
+                    "path": relative.as_posix(),
+                    "status": "non_regular_not_copied",
+                }
+            )
+            continue
+        target = backup_root.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        records.append(
+            {
+                "path": relative.as_posix(),
+                "backup_path": str(target),
+                "sha256": digest,
+                "bytes": target.stat().st_size,
+                "status": "copied",
+            }
+        )
+    return tuple(records)
 
 
 async def _export_recovery(
@@ -149,14 +214,23 @@ async def _export_recovery(
     status_path = root / "status.txt"
     patch_path.write_text(diff, encoding="utf-8")
     status_path.write_text(status.replace("\0", "\n"), encoding="utf-8")
-    return {
+    untracked = await _backup_untracked_files(
+        research_module,
+        worktree,
+        root,
+    )
+    manifest_path = root / "recovery.json"
+    manifest = {
         "patch_path": str(patch_path),
         "patch_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
         "patch_bytes": len(diff.encode("utf-8")),
         "status_path": str(status_path),
+        "untracked": list(untracked),
         "had_uncommitted_changes": bool(status.strip()),
         "exported_at": _utc_now(),
     }
+    _atomic_json(manifest_path, manifest)
+    return {**manifest, "manifest_path": str(manifest_path)}
 
 
 async def _cleanup_worktree(
@@ -201,7 +275,8 @@ async def _cleanup_worktree(
         {
             "phase": "worktree_cleaned",
             "detail": (
-                f"local worktree and branch removed; recovery={recovery['patch_path']}; "
+                "local worktree and branch removed; "
+                f"recovery={recovery['manifest_path']}; "
                 "remote PR and branch unchanged"
             ),
             "timestamp": state.updated_at,
@@ -236,19 +311,14 @@ def install_research_campaign_worktree_control_service(
             "base_branch": state.base_branch,
             "error": state.error,
             "cleanup": cleanup if isinstance(cleanup, dict) else None,
-            "can_revise": bool(state.worktree_path) and state.status in {
-                "needs_revision",
-                "failed",
-                "blocked",
-                "delivered",
-            },
+            "can_revise": bool(state.worktree_path)
+            and state.status
+            in {"needs_revision", "failed", "blocked", "delivered"},
             "can_cleanup": bool(state.worktree_path)
             and state.status in _ALLOWED_CLEANUP_STATUSES,
         }
 
-    @research_module.router.post(
-        "/campaigns/{campaign_id}/cleanup-worktree"
-    )
+    @research_module.router.post("/campaigns/{campaign_id}/cleanup-worktree")
     async def cleanup_campaign_worktree(
         campaign_id: str,
         body: CleanupCampaignWorktreeRequest,
