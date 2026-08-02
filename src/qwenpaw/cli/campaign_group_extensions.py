@@ -22,6 +22,6 @@ def install_campaign_group_extensions(group: click.Group) -> click.Group:
         "cleanup-worktree": campaign_cleanup_worktree_cmd,
     }
     for name, command in commands.items():
-        if group.get_command(click.Context(group), name) is None:
+        if name not in group.commands:
             group.add_command(command, name)
     return group
