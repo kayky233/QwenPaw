@@ -33,13 +33,22 @@ _ALLOWED_ENVIRONMENT = frozenset(
         "UV_PROJECT_ENVIRONMENT",
         "PIP_CACHE_DIR",
         "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_CERT",
         "NPM_CONFIG_CACHE",
         "NODE_PATH",
         "RUSTUP_HOME",
-        "CARGO_HOME",
         "GOMODCACHE",
         "GOCACHE",
         "JAVA_HOME",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "GIT_SSL_CAINFO",
     }
 )
 _BLOCKED_NAME_PARTS = (
@@ -57,7 +66,9 @@ _BLOCKED_NAME_PARTS = (
 )
 _REDACTION_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s]+"),
-    re.compile(r"(?i)((?:token|secret|password|passwd|api[_-]?key)\s*[:=]\s*)[^\s]+"),
+    re.compile(
+        r"(?i)((?:token|secret|password|passwd|api[_-]?key)\s*[:=]\s*)[^\s]+"
+    ),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
@@ -106,9 +117,13 @@ class CampaignSubprocessRunner:
             for key, value in source.items()
             if key in _ALLOWED_ENVIRONMENT and not _is_sensitive_name(key)
         }
+        # Deliberately do not preserve CARGO_HOME, GH config, cloud config, or
+        # user HOME: each can contain long-lived credentials. Tool caches that
+        # are safe and explicitly allowlisted remain available.
         self.base_environment.update(
             {
                 "HOME": str(self.home_dir),
+                "USERPROFILE": str(self.home_dir),
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
                 "PIP_NO_INPUT": "1",
