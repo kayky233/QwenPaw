@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_management_transport import AgentManagementTaskTransport
+from .campaign_execution_runner import redact_campaign_output
 from .collaboration_contracts import (
     ResearchAgentRole,
     ReviewDecision,
@@ -48,7 +49,13 @@ def _verified_diff(
     digest = ResearchArtifactContract.hash_content(content)
     if digest != artifact.content_hash:
         raise RuntimeError("verified Campaign patch hash mismatch")
-    return _truncate(content, _MAX_DIFF_CHARACTERS)
+    if len(content) > _MAX_DIFF_CHARACTERS:
+        raise RuntimeError(
+            "verified Campaign diff exceeds the independent review limit; "
+            "split the change into smaller Campaigns instead of reviewing a "
+            f"truncated diff ({len(content)} > {_MAX_DIFF_CHARACTERS})"
+        )
+    return content
 
 
 def _verified_tests(
@@ -76,11 +83,11 @@ def _verified_tests(
                 "timed_out": bool(payload.get("timed_out", False)),
                 "duration_seconds": payload.get("duration_seconds"),
                 "stdout": _truncate(
-                    str(payload.get("stdout", "")),
+                    redact_campaign_output(str(payload.get("stdout", ""))),
                     _MAX_OUTPUT_CHARACTERS,
                 ),
                 "stderr": _truncate(
-                    str(payload.get("stderr", "")),
+                    redact_campaign_output(str(payload.get("stderr", ""))),
                     _MAX_OUTPUT_CHARACTERS,
                 ),
                 "content_hash": artifact.content_hash,
@@ -165,7 +172,7 @@ class HostEvidenceCampaignReviewer:
                 f"Approved paths: {list(episode.modifiable_files)}\n"
                 f"Candidate tree: {candidate.checkpoint.tree_revision}\n"
                 f"Candidate diff SHA-256: {candidate.checkpoint.diff_hash}\n\n"
-                "--- HOST-VERIFIED DIFF ---\n"
+                "--- HOST-VERIFIED COMPLETE DIFF ---\n"
                 f"{diff}\n"
                 "--- END DIFF ---\n\n"
                 "--- HOST-VERIFIED TEST EVIDENCE ---\n"
@@ -208,7 +215,8 @@ class HostEvidenceCampaignReviewer:
                 "required_changes": list(decision.required_changes),
                 "candidate_diff_hash": candidate.checkpoint.diff_hash,
                 "test_artifact_count": len(tests),
-                "evidence_source": "host_verified",
+                "evidence_source": "host_verified_complete",
+                "diff_characters": len(diff),
             },
         )
         self.emit("reviewed", f"Reviewer verdict: {decision.verdict.value}")
