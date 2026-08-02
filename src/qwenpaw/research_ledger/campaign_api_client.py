@@ -73,6 +73,42 @@ class CampaignApiClient:
             {},
         )
 
+    def revise(
+        self,
+        campaign_id: str,
+        *,
+        feedback: str = "",
+        monitor_attempts: int = 10,
+        monitor_interval_seconds: float = 30.0,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/research/campaigns/{campaign_id}/revise",
+            {
+                "feedback": feedback,
+                "monitor_attempts": monitor_attempts,
+                "monitor_interval_seconds": monitor_interval_seconds,
+            },
+        )
+
+    def recovery(self, campaign_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/research/campaigns/{campaign_id}/recovery",
+        )
+
+    def cleanup_worktree(
+        self,
+        campaign_id: str,
+        *,
+        confirmation: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/research/campaigns/{campaign_id}/cleanup-worktree",
+            {"confirmation": confirmation},
+        )
+
     def refresh_delivery(self, campaign_id: str) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -198,6 +234,16 @@ def write_campaign_report(
         if isinstance(outcome.get("delivery_lifecycle"), dict)
         else {}
     )
+    cleanup = (
+        outcome.get("worktree_cleanup")
+        if isinstance(outcome.get("worktree_cleanup"), dict)
+        else {}
+    )
+    revisions = (
+        outcome.get("revision_history")
+        if isinstance(outcome.get("revision_history"), list)
+        else []
+    )
     artifacts = outcome.get("artifacts") if isinstance(outcome, dict) else []
     artifact_rows = "\n".join(
         "| {} | {} | {} | `{}` |".format(
@@ -221,6 +267,16 @@ def write_campaign_report(
         for item in attempts
         if isinstance(item, dict)
     ) or "| - | not_monitored | - | - |"
+    revision_rows = "\n".join(
+        "| {} | {} | `{}` | {} |".format(
+            item.get("revision_number", ""),
+            item.get("status", ""),
+            str(item.get("commit_sha", ""))[:12],
+            item.get("reason", ""),
+        )
+        for item in revisions
+        if isinstance(item, dict)
+    ) or "| - | none | - | - |"
     markdown_path = json_path.with_suffix(".md")
     markdown_path.write_text(
         "# AutoResearch Issue Campaign\n\n"
@@ -240,6 +296,15 @@ def write_campaign_report(
         "| Attempt | Status | Review decision | Blockers |\n"
         "|---:|---|---|---|\n"
         f"{monitor_rows}\n\n"
+        "## Revisions\n\n"
+        "| Revision | Status | Commit | Reason |\n"
+        "|---:|---|---|---|\n"
+        f"{revision_rows}\n\n"
+        "## Worktree recovery\n\n"
+        f"- Cleanup status: `{cleanup.get('status', 'not_cleaned')}`\n"
+        f"- Recovery patch: `{cleanup.get('recovery', {}).get('patch_path', '') if isinstance(cleanup.get('recovery'), dict) else ''}`\n"
+        "- Remote branch deleted: `no`\n"
+        "- Change request modified by cleanup: `no`\n\n"
         "## Verified artifacts\n\n"
         "| Type | Step | Verified | SHA-256 |\n"
         "|---|---|---:|---|\n"
