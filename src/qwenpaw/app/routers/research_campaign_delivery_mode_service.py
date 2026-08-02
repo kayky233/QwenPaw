@@ -13,6 +13,7 @@ from ...research_ledger.agent_management_transport import (
     AgentManagementTaskTransport,
 )
 from ...research_ledger.campaign_delivery import CampaignChangeRequestDeliverer
+from ...research_ledger.campaign_execution_runner import CampaignSubprocessRunner
 from ...research_ledger.change_request_delivery import ChangeRequestProvider
 from ...research_ledger.change_request_providers import (
     GitHubChangeRequestProvider,
@@ -22,7 +23,6 @@ from ...research_ledger.collaboration_contracts import (
     TaskEnvelope,
 )
 from ...research_ledger.episode_package import EpisodeCommand, EpisodePackage
-from ...research_ledger.execution_runner import LocalSubprocessRunner
 from ...research_ledger.host_evidence_reviewer import (
     HostEvidenceCampaignReviewer,
 )
@@ -273,9 +273,15 @@ async def _execute_issue_campaign_with_delivery(
         "running",
         f"Starting bounded {delivery_mode} Issue Campaign",
     )
+    validation_home = (
+        Path(research_module.WORKING_DIR)
+        / ".qwenpaw"
+        / "research-campaign-homes"
+        / campaign_id
+    )
     outcome = await IssueCampaignRunner(
         campaign_runtime._PreparedIssueService(prepared),
-        LocalSubprocessRunner(),
+        CampaignSubprocessRunner(validation_home),
     ).run(
         request,
         executor=executor,
