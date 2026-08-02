@@ -89,7 +89,9 @@ def _run_stage(
     )
     elapsed = time.monotonic() - started
     log_path.write_text(
-        "$ " + shlex.join(command) + "\n\n"
+        "$ "
+        + shlex.join(command)
+        + "\n\n"
         + completed.stdout
         + ("\n--- STDERR ---\n" + completed.stderr if completed.stderr else ""),
         encoding="utf-8",
@@ -116,6 +118,21 @@ def _skipped(name: str, output_dir: Path, reason: str) -> StageResult:
         log=str(log_path),
         skipped=True,
     )
+
+
+def _campaign_unit_tests(root: Path) -> tuple[str, ...]:
+    paths = [Path("tests/unit/research_ledger")]
+    paths.extend(
+        path.relative_to(root)
+        for path in sorted(
+            (root / "tests/unit/app/routers").glob("test_research_campaign*.py")
+        )
+    )
+    paths.extend(
+        path.relative_to(root)
+        for path in sorted((root / "tests/unit/cli").glob("test_campaign*.py"))
+    )
+    return tuple(path.as_posix() for path in paths)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -167,9 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "test",
                         "pytest",
                         "-q",
-                        "tests/unit/research_ledger/",
-                        "tests/unit/app/routers/test_research_campaign*.py",
-                        "tests/unit/cli/test_campaign*.py",
+                        *_campaign_unit_tests(root),
                         "--tb=short",
                     ),
                 ),
@@ -253,10 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "root": str(root),
         "output_dir": str(output_dir),
         "passed": all(item.passed for item in results),
-        "stages": [
-            {**asdict(item), "passed": item.passed}
-            for item in results
-        ],
+        "stages": [{**asdict(item), "passed": item.passed} for item in results],
     }
     summary_path = output_dir / "summary.json"
     summary_path.write_text(
